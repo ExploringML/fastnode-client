@@ -4,7 +4,7 @@ import { EllipsisVertical, Trash } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Slot } from "@radix-ui/react-slot";
-import { Button, ButtonProps } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -106,7 +106,7 @@ NodeHeaderActions.displayName = "NodeHeaderActions";
 
 /* NODE HEADER ACTION ------------------------------------------------------- */
 
-export type NodeHeaderActionProps = ButtonProps & {
+export type NodeHeaderActionProps = React.ComponentProps<typeof Button> & {
   label: string;
 };
 
@@ -159,10 +159,26 @@ export const NodeHeaderMenuAction = forwardRef<
   HTMLButtonElement,
   NodeHeaderMenuActionProps
 >(({ trigger, children, ...props }, ref) => {
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    // Stop the event from reaching React Flow's selection handler
+    e.stopPropagation();
+    e.preventDefault();
+  }, []);
+
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    // Also stop click propagation to be safe
+    e.stopPropagation();
+  }, []);
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <NodeHeaderAction ref={ref} {...props}>
+        <NodeHeaderAction
+          ref={ref}
+          {...props}
+          onMouseDown={handleMouseDown}
+          onClick={handleClick}
+        >
           {trigger ?? <EllipsisVertical />}
         </NodeHeaderAction>
       </DropdownMenuTrigger>

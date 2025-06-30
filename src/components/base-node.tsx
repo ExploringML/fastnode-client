@@ -13,7 +13,6 @@ export const BaseNode = forwardRef<
       className,
       selected ? "border-gray-400 shadow-lg" : "",
     )}
-    tabIndex={0}
     {...props}
   />
 ));

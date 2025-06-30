@@ -1,6 +1,5 @@
-import MetaNode from './nodes/MetaNode'; // your new dynamic renderer
-import NumberField from './widgets/NumberField'; // your first widget
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import MetaNode from './nodes/MetaNode';
+import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -28,7 +27,7 @@ import {
   DropdownMenu, DropdownMenuTrigger,
   DropdownMenuContent, DropdownMenuItem
 } from "@/components/ui/dropdown-menu";
-import { Plus } from "lucide-react";
+import { Plus, RefreshCcw } from "lucide-react";
 import { useReactFlow } from "@xyflow/react";
 import { nanoid } from "nanoid";
 import { loadNodeRegistry } from './custom_utils/loadNodeRegistry';
@@ -112,7 +111,6 @@ function AddNodeMenuItems({ registry }) {
 
 export default function App() {
   const [nodeRegistry, setNodeRegistry] = useState(null);
-  const [nodeTypes, setNodeTypes] = useState({});
   const [wsConnected, setWsConnected] = useState(false);
   const [imageData, setImageData] = useState('');
   const [loading, setLoading] = useState(false);
@@ -124,6 +122,74 @@ export default function App() {
 
   const promptRef = useRef('');
   const modelRef = useRef('gpt-image-1');
+
+  // Handle field changes from MetaNode using the proper useNodesState mechanism
+  const handleFieldChangeRef = useRef();
+  handleFieldChangeRef.current = (nodeId, field, value) => {
+    setNodes((nodes) => {
+      return nodes.map((node) => {
+        if (node.id !== nodeId) return node;
+
+        const oldVal = node.data?.[field];
+        if (oldVal === value) {
+          return node;
+        }
+
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            [field]: value,
+          },
+        };
+      });
+    });
+  };
+
+  // Stable callback that doesn't change reference
+  const stableHandleFieldChange = useCallback((nodeId, field, value) => {
+    handleFieldChangeRef.current(nodeId, field, value);
+  }, []);
+
+  // Use refs for stable callbacks
+  const handleNodeActionRef = useRef();
+  handleNodeActionRef.current = (action, id) => {
+    setNodes((nodes) => {
+      const node = nodes.find((n) => n.id === id);
+      const def = nodeRegistry?.nodes?.[node?.data?.type];
+
+      switch (action) {
+        case "reset":
+          if (!def) return nodes;
+          const defaults = {};
+          for (const [k, v] of Object.entries(def.params || {})) {
+            defaults[k] = v.default ?? null;
+          }
+          return nodes.map((n) =>
+            n.id === id ? { ...n, data: { ...n.data, ...defaults } } : n
+          );
+
+        case "delete":
+          // Defer deletion to next tick to allow React Flow to finish processing events
+          setTimeout(() => {
+            setNodes((prevNodes) => prevNodes.filter((n) => n.id !== id));
+          }, 0);
+          return nodes; // Return unchanged nodes for now
+
+        case "logId":
+          console.log("Node ID:", id);
+          return nodes;
+
+        default:
+          console.warn("Unhandled action:", action);
+          return nodes;
+      }
+    });
+  };
+
+  const stableHandleNodeAction = useCallback((action, id) => {
+    handleNodeActionRef.current(action, id);
+  }, []);
 
   const handlePromptChange = useCallback((prompt) => {
     promptRef.current = prompt;
@@ -178,33 +244,40 @@ export default function App() {
     const { nodes: n2, edges: e2 } = await runFlow({
       nodes,
       edges,
-      targetIds: sinkNodeIds, // 🔁 multiple sink support
+      targetIds: sinkNodeIds,
       setNodes,
+      nodeRegistry,  // ✅ must be included
       options: { traversal: false, evaluation: true, delay: 500 },
     });
 
     setNodes(n2);
     setEdges(e2);
-  }, [nodes, edges]);
+  }, [nodes, edges, nodeRegistry]);
+
+  const nodeTypes = useMemo(() => {
+    if (!nodeRegistry) return {};
+
+    const nt = {};
+    for (const [type, def] of Object.entries(nodeRegistry.nodes)) {
+      nt[type] = def.clientOnly
+        ? (props) => (
+          <MetaNode
+            {...props}
+            nodeRegistry={nodeRegistry}                   // ✅ pass registry directly
+            onFieldChange={stableHandleFieldChange}
+            onAction={stableHandleNodeAction}
+          />
+        )
+        : () => <div>Backend node</div>;
+    }
+    return nt;
+  }, [nodeRegistry, stableHandleFieldChange, stableHandleNodeAction]);
 
   useEffect(() => {
-    const widgetMap = {
-      number: NumberField,
-      // Add more as needed
-    };
-
     async function initNodeTypes() {
       const reg = await loadNodeRegistry();
+      console.log("🔍 Registry contents:", reg);
       setNodeRegistry(reg);
-
-      window.nodeRegistry = reg; // for MetaNode
-      const nt = {};
-
-      for (const [type, def] of Object.entries(reg.nodes)) {
-        nt[type] = def.clientOnly ? MetaNode : () => <div>Backend node</div>; // fallback for now
-      }
-
-      setNodeTypes(nt);
     }
 
     initNodeTypes();
@@ -223,6 +296,8 @@ export default function App() {
   }, [setEdges]);
 
   useEffect(() => {
+    if (!nodeRegistry) return; // wait until registry is ready
+
     setNodes([
       // {
       //   id: 'trigger',
@@ -267,9 +342,9 @@ export default function App() {
       //   position: { x: 1200, y: 0 },
       //   data: { value: 0 },
       // },
-      { id: 'a', type: 'number', data: { value: 0 }, position: { x: 0, y: 0 } },
-      { id: 'b', type: 'number', data: { value: 0 }, position: { x: 0, y: 200 } },
-      { id: 'd', type: 'number', data: { value: 0 }, position: { x: 0, y: 400 } },
+      // { id: 'a', type: 'number', data: { type: 'number', value: 0 }, position: { x: 0, y: 0 } },
+      // { id: 'b', type: 'number', data: { type: 'number', value: 0 }, position: { x: 0, y: 200 } },
+      //{ id: 'c', type: 'sumNode', data: { type: 'sumNode', value: 0 }, position: { x: 300, y: 100 } },
       // { id: 'a', type: 'numNode', data: { value: 0 }, position: { x: 0, y: 0 } },
       // { id: 'b', type: 'numNode', data: { value: 0 }, position: { x: 0, y: 200 } },
       // { id: 'c', type: 'sumNode', data: { value: 0 }, position: { x: 300, y: 100 } },
@@ -279,50 +354,51 @@ export default function App() {
     ]);
 
     setEdges([
-      {
-        id: 'a->c',
-        type: 'data',
-        data: { key: 'value' },
-        source: 'a',
-        target: 'c',
-        targetHandle: 'x',
-      },
-      {
-        id: 'b->c',
-        type: 'data',
-        data: { key: 'value' },
-        source: 'b',
-        target: 'c',
-        targetHandle: 'y',
-      },
-      {
-        id: 'c->e',
-        type: 'data',
-        data: { key: 'value' },
-        source: 'c',
-        target: 'e',
-        targetHandle: 'x',
-      },
-      {
-        id: 'd->e',
-        type: 'data',
-        data: { key: 'value' },
-        source: 'd',
-        target: 'e',
-        targetHandle: 'y',
-      },
-      {
-        id: 'e->f',
-        type: 'data',
-        data: { key: 'value' },
-        source: 'e',
-        target: 'f',
-        targetHandle: 'value',
-      },
+      // {
+      //   id: 'a->c',
+      //   type: 'data',
+      //   data: { key: 'value' },
+      //   source: 'a',
+      //   target: 'c',
+      //   targetHandle: 'x',
+      // },
+      // {
+      //   id: 'b->c',
+      //   type: 'data',
+      //   data: { key: 'value' },
+      //   source: 'b',
+      //   target: 'c',
+      //   targetHandle: 'y',
+      // },
+      // {
+      //   id: 'c->e',
+      //   type: 'data',
+      //   data: { key: 'value' },
+      //   source: 'c',
+      //   target: 'e',
+      //   targetHandle: 'x',
+      // },
+      // {
+      //   id: 'd->e',
+      //   type: 'data',
+      //   data: { key: 'value' },
+      //   source: 'd',
+      //   target: 'e',
+      //   targetHandle: 'y',
+      // },
+      // {
+      //   id: 'e->f',
+      //   type: 'data',
+      //   data: { key: 'value' },
+      //   source: 'e',
+      //   target: 'f',
+      //   targetHandle: 'value',
+      // },
     ]);
-  }, []);
+  }, [nodeRegistry]);
 
   useEffect(() => {
+    // update to use 	const isDev = import.meta.env.DEV; as we do in localNodeRegistry.js
     const isDev = window.location.hostname === 'localhost';
 
     const wsUrl = isDev
@@ -332,7 +408,6 @@ export default function App() {
     const socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
-      console.log('✅ WebSocket connected');
       ws.current = socket;
       setWsConnected(true);
     };
@@ -414,6 +489,10 @@ export default function App() {
     );
   }, []);
 
+  if (!nodeRegistry) {
+    return <div className="p-4 text-gray-500">Loading node registry&hellip;</div>;
+  }
+
   return (
     <>
       <div className="w-screen h-screen flex flex-col">
@@ -429,6 +508,10 @@ export default function App() {
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               fitView
+              nodesFocusable={true}
+              edgesFocusable={true}
+              disableKeyboardA11y={false}
+              aria-label="Node editor canvas"
             >
               <Controls />
               <MiniMap />
@@ -452,22 +535,35 @@ export default function App() {
                   Run All
                 </button>
               </Panel>
-              <Panel position="top-left" className="p-2">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
-                    >
-                      <Plus className="text-black h-4 w-4" /> Add node
-                    </button>
-                  </DropdownMenuTrigger>
-
-                  <DropdownMenuContent className="w-32">
-                    <AddNodeMenuItems registry={window.nodeRegistry || {}} />
-                  </DropdownMenuContent>
-                </DropdownMenu>
+              <Panel position="top-right" className="p-2">
+                <button
+                  className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
+                  onClick={async () => {
+                    const fresh = await loadNodeRegistry({ forceRefresh: true });
+                    setNodeRegistry(fresh); // 🔁 triggers useMemo, node types re-init
+                    setNodes((nodes) => [...nodes]); // 🌀 force re-render of all nodes
+                  }}
+                >
+                  <RefreshCcw className="text-black h-4 w-4" /> Refresh Nodes
+                </button>
               </Panel>
             </ReactFlow>
+            {/* Move dropdown outside of ReactFlow to avoid aria-hidden conflicts */}
+            <div className="absolute top-2 left-2 z-10">
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
+                  >
+                    <Plus className="text-black h-4 w-4" /> Add node
+                  </button>
+                </DropdownMenuTrigger>
+
+                <DropdownMenuContent className="w-32">
+                  {nodeRegistry && <AddNodeMenuItems registry={nodeRegistry} />}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
 
             {/* <div className="absolute top-4 left-4 z-50 bg-teal-500 text-white p-4 rounded-lg shadow-lg">
               Image Generation Workflow
