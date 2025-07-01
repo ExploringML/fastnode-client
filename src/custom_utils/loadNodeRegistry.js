@@ -1,9 +1,15 @@
+const STORAGE_KEY = "node-registry";
+const VERSION_KEY = "node-registry-version";
+const EXPECTED_VERSION = "1.0.0"; // Update this when the registry format changes
+
 export async function loadNodeRegistry({ forceRefresh = false } = {}) {
 	const isDev = import.meta.env.DEV;
 	const storage = isDev ? localStorage : sessionStorage;
-	const STORAGE_KEY = "node-registry";
-	const VERSION_KEY = "node-registry-version";
-	const EXPECTED_VERSION = "1.0.0"; // ⬅️ Update this when registry format changes
+
+	// Force refresh in dev (always bypass cache in dev mode)
+	if (isDev) {
+		forceRefresh = true;
+	}
 
 	if (!forceRefresh) {
 		const cached = storage.getItem(STORAGE_KEY);
@@ -13,21 +19,27 @@ export async function loadNodeRegistry({ forceRefresh = false } = {}) {
 			try {
 				return JSON.parse(cached);
 			} catch (e) {
-				console.warn("Corrupt registry cache. Refetching...");
+				console.warn("⚠️ Corrupt registry cache. Refetching...");
 			}
 		}
 	}
 
-	// fetch from backend
-	const api = isDev ? "http://localhost:5001" : "";
-	const res = await fetch(`${api}/node-registry`);
-	if (!res.ok) throw new Error("Failed to load node registry");
+	try {
+		const api = isDev ? "http://localhost:5001" : "";
+		const res = await fetch(`${api}/node-registry`);
 
-	const data = await res.json();
+		if (!res.ok) {
+			throw new Error(`Non-200 response: ${res.status}`);
+		}
 
-	// update cache
-	storage.setItem(STORAGE_KEY, JSON.stringify(data));
-	storage.setItem(VERSION_KEY, EXPECTED_VERSION);
+		const data = await res.json();
 
-	return data;
+		storage.setItem(STORAGE_KEY, JSON.stringify(data));
+		storage.setItem(VERSION_KEY, EXPECTED_VERSION);
+
+		return data;
+	} catch (err) {
+		console.error("❌ Failed to load node registry:", err);
+		return { version: EXPECTED_VERSION, nodes: {} }; // Safe fallback
+	}
 }

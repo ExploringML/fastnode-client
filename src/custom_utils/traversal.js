@@ -1,6 +1,15 @@
-/* Build adjacency map:  targetId → [{ source, handle }] */
+// traversal.js  ────────────────────────────────────────────────────────────
+// A drop-in upgrade that can evaluate non-client nodes through the backend
+// over an open WebSocket.
+// ──────────────────────────────────────────────────────────────────────────
+
+import { nanoid } from 'nanoid';   // tiny unique ids for WS request tracking
+
+/* ------------------------------------------------------------------ */
+/* 0. Small helpers                                                   */
+/* ------------------------------------------------------------------ */
 export function buildInputGraph(edges) {
-	const g = new Map();
+	const g = new Map();            // targetId → [ {source, handle} ]
 	for (const e of edges) {
 		if (!g.has(e.target)) g.set(e.target, []);
 		g.get(e.target).push({ source: e.source, handle: e.targetHandle });
@@ -11,6 +20,9 @@ export function buildInputGraph(edges) {
 const delay = (ms = 0) => new Promise(r => setTimeout(r, ms));
 const flush = () => new Promise(r => requestAnimationFrame(r));
 
+/* ------------------------------------------------------------------ */
+/* 1. Client-side evaluators (unchanged)                              */
+/* ------------------------------------------------------------------ */
 function evaluateClientNode(node, def, inputVals) {
 	const type = node.data?.type;
 
@@ -37,6 +49,53 @@ function evaluateClientNode(node, def, inputVals) {
 	return null;
 }
 
+/* ------------------------------------------------------------------ */
+/* 2. NEW helper: call backend via WebSocket                           */
+/* ------------------------------------------------------------------ */
+function evaluateServerNode(ws, node, inputVals, timeoutMs = 5000) {
+	return new Promise((resolve, reject) => {
+		if (!ws || ws.readyState !== WebSocket.OPEN) {
+			return reject(new Error('WebSocket not open'));
+		}
+
+		const reqId = nanoid(8);
+
+		const onMessage = (ev) => {
+			try {
+				const msg = JSON.parse(ev.data);
+				if (msg.type === 'node-result' && msg.requestId === reqId) {
+					ws.removeEventListener('message', onMessage);
+					if ('error' in msg) reject(new Error(msg.error));
+					else resolve(msg.result);
+				}
+			} catch {
+				/* ignore non-JSON frames */
+			}
+		};
+
+		ws.addEventListener('message', onMessage);
+
+		// fire request
+		ws.send(JSON.stringify({
+			type: 'evaluate-node',
+			requestId: reqId,
+			nodeType: node.data.type,
+			nodeId: node.id,
+			inputs: inputVals,
+			params: node.data          // send full data payload
+		}));
+
+		// safety timeout
+		setTimeout(() => {
+			ws.removeEventListener('message', onMessage);
+			reject(new Error('Node evaluation timeout'));
+		}, timeoutMs);
+	});
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Recursive evaluation                                            */
+/* ------------------------------------------------------------------ */
 async function evaluateNode({
 	id,
 	graph,
@@ -50,19 +109,31 @@ async function evaluateNode({
 	if (visited.has(id)) return 0;
 	visited.add(id);
 
-	// ---------- 1. traversal highlight ----------
+	const node = nodeMap[id];
+	if (!node) {
+		console.warn(`⚠️ Node with ID "${id}" is missing — skipping.`);
+		return 0;
+	}
+
+	const def = nodeRegistry?.nodes?.[node.data?.type];
+	if (!def) {
+		console.warn(`⚠️ Missing node definition for type: ${node.data?.type}`);
+		return 0;
+	}
+
+	/* 1. traversal highlight (unchanged) */
 	if (opts.traversal) {
-		setNodes(ns => ns.map(n => n.id === id
-			? { ...n, data: { ...n.data, traversing: true } }
-			: n));
+		setNodes(ns => ns.map(n =>
+			n.id === id ? { ...n, data: { ...n.data, traversing: true } } : n
+		));
 		await flush(); await delay(opts.delay);
-		setNodes(ns => ns.map(n => n.id === id
-			? { ...n, data: { ...n.data, traversing: false } }
-			: n));
+		setNodes(ns => ns.map(n =>
+			n.id === id ? { ...n, data: { ...n.data, traversing: false } } : n
+		));
 		await flush();
 	}
 
-	// ---------- 2. recursive upstream walk ----------
+	/* 2. recurse upstream */
 	const inputs = graph.get(id) ?? [];
 
 	if (memo.has(id)) {
@@ -76,46 +147,40 @@ async function evaluateNode({
 		await evaluateNode({ id: source, graph, nodeMap, setNodes, nodeRegistry, opts, visited, memo });
 	}
 
-	// ---------- 3. build inputVals from edges ----------
-	const node = nodeMap[id];
-	const def = nodeRegistry?.nodes?.[node.data?.type];
-
-	if (!def) {
-		console.warn(`⚠️ Missing node definition for type: ${node.data?.type}`);
-		return 0;
-	}
-
+	/* 3. build inputVals */
 	const inputVals = {};
 	for (const { source, handle } of inputs) {
 		inputVals[handle] = nodeMap[source]?.data?.value;
 	}
 
+	/* 4. evaluate */
 	let newVal;
-
 	if (def.clientOnly) {
 		newVal = evaluateClientNode(node, def, inputVals);
 	} else {
-		// 🔧 Stub for backend evaluation
-		console.warn(`🔄 Backend execution not implemented for: ${node.data?.type}`);
-		newVal = null;
+		try {
+			newVal = await evaluateServerNode(opts.ws, node, inputVals);
+		} catch (err) {
+			console.error(`🧨 Remote eval failed for ${node.id}:`, err);
+			newVal = null;
+		}
 	}
+	nodeMap[id].data.value = newVal;
 
-	nodeMap[id].data.value = newVal; // store into nodeMap
-
-	// ---------- 4. evaluation highlight ----------
+	/* 5. evaluation highlight (unchanged) */
 	if (opts.evaluation) {
-		setNodes(ns => ns.map(n => n.id === id
-			? { ...n, data: { ...n.data, evaluating: true } }
-			: n));
+		setNodes(ns => ns.map(n =>
+			n.id === id ? { ...n, data: { ...n.data, evaluating: true } } : n
+		));
 		await flush(); await delay(opts.delay);
-		setNodes(ns => ns.map(n => n.id === id
-			? { ...n, data: { ...n.data, evaluating: false, value: newVal } }
-			: n));
+		setNodes(ns => ns.map(n =>
+			n.id === id ? { ...n, data: { ...n.data, evaluating: false, value: newVal } } : n
+		));
 		await flush();
 	} else {
-		setNodes(ns => ns.map(n => n.id === id
-			? { ...n, data: { ...n.data, value: newVal } }
-			: n));
+		setNodes(ns => ns.map(n =>
+			n.id === id ? { ...n, data: { ...n.data, value: newVal } } : n
+		));
 	}
 
 	memo.set(id, newVal);
@@ -123,12 +188,16 @@ async function evaluateNode({
 	return newVal;
 }
 
+/* ------------------------------------------------------------------ */
+/* 4. Public entry: runFlow                                           */
+/* ------------------------------------------------------------------ */
 export async function runFlow({
 	nodes,
 	edges,
 	targetIds,
 	setNodes,
 	nodeRegistry,
+	ws,                              // NEW  ← pass ws.current
 	options = { traversal: true, evaluation: true, delay: 300 },
 }) {
 	const graph = buildInputGraph(edges);
@@ -142,7 +211,7 @@ export async function runFlow({
 			nodeMap,
 			setNodes,
 			nodeRegistry,
-			opts: options,
+			opts: { ...options, ws },   // thread WS down
 			memo,
 		});
 	}

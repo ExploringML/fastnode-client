@@ -13,14 +13,6 @@ import {
 } from '@xyflow/react';
 import { Heart } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
-import TextInputNode from './custom_nodes/TextInputNode';
-import ImageGenNode from './custom_nodes/ImageGenNode';
-import ImageDisplayNode from './custom_nodes/ImageDisplayNode';
-import TriggerNode from './custom_nodes/TriggerNode';
-import NodeHeaderDemo from './custom_nodes/NodeHeaderDemo';
-import NumNode from './custom_nodes/NumNode';
-import SumNode from './custom_nodes/SumNode';
-import TextOutput from './custom_nodes/TextOutput';
 import { DataEdge } from '@/components/data-edge';
 import { runFlow } from './custom_utils/traversal';
 import {
@@ -32,61 +24,40 @@ import { useReactFlow } from "@xyflow/react";
 import { nanoid } from "nanoid";
 import { loadNodeRegistry } from './custom_utils/loadNodeRegistry';
 
-// const nodeTypes = {
-//   textInput: TextInputNode,
-//   imageGen: ImageGenNode,
-//   imageDisplay: ImageDisplayNode,
-//   triggerNode: TriggerNode,
-//   nodeHeaderDemo: NodeHeaderDemo,
-//   textOutput: TextOutput,
-//   numNode: NumNode,
-//   sumNode: SumNode,
-// };
-
 const edgeTypes = {
   data: DataEdge,
 };
 
-function useNodeFactory() {
+function useNodeFactory(registry) {
   const rf = useReactFlow();
 
   return (type) => {
     const pos = rf.screenToFlowPosition({ x: 120, y: 120 });
+    const meta = registry?.nodes?.[type];
 
-    rf.setNodes(nodes => [
+    if (!meta) {
+      console.warn(`⚠️ Cannot insert node: missing metadata for "${type}"`);
+      return;
+    }
+
+    rf.setNodes((nodes) => [
       ...nodes,
       {
-        id: `${nanoid(6)}`,
-        type,  // tells ReactFlow to use `MetaNode`
+        id: nanoid(6),
+        type,
         position: pos,
         data: {
-          type,     // ✅ tells MetaNode what schema to look up
-          value: 0, // optional default value
+          type,
+          value: 0,
+          meta, // ✅ embed schema directly so node can self-render
         },
       },
     ]);
   };
 }
 
-// function AddNodeMenuItems() {
-//   const add = useNodeFactory();
-//   return (
-//     <>
-//       <DropdownMenuItem onSelect={e => { e.preventDefault(); add('numNode'); }}>
-//         Num Node
-//       </DropdownMenuItem>
-//       <DropdownMenuItem onSelect={e => { e.preventDefault(); add('sumNode'); }}>
-//         Sum Node
-//       </DropdownMenuItem>
-//       <DropdownMenuItem onSelect={e => { e.preventDefault(); add('textOutput'); }}>
-//         Result
-//       </DropdownMenuItem>
-//     </>
-//   );
-// }
-
 function AddNodeMenuItems({ registry }) {
-  const add = useNodeFactory();
+  const add = useNodeFactory(registry);
 
   if (!registry?.nodes) return null;
 
@@ -109,7 +80,28 @@ function AddNodeMenuItems({ registry }) {
   );
 }
 
+function makeNodeTypes(registry, onFieldChange, onAction) {
+  if (!registry) return {};
+
+  const nt = {};
+  for (const [type, def] of Object.entries(registry.nodes)) {
+    nt[type] = def.clientOnly
+      ? (props) => (
+        <MetaNode
+          {...props}
+          nodeRegistry={registry}
+          onFieldChange={onFieldChange}
+          onAction={onAction}
+        />
+      )
+      : () => <div>Backend node</div>;
+  }
+  return nt;
+}
+
 export default function App() {
+  const [workflowFile, setWorkflowFile] = useState('default.json');
+  const [isDirty, setIsDirty] = useState(false);
   const [nodeRegistry, setNodeRegistry] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [imageData, setImageData] = useState('');
@@ -120,6 +112,7 @@ export default function App() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
+  const nodeTypesRef = useRef({});
   const promptRef = useRef('');
   const modelRef = useRef('gpt-image-1');
 
@@ -173,8 +166,11 @@ export default function App() {
           // Defer deletion to next tick to allow React Flow to finish processing events
           setTimeout(() => {
             setNodes((prevNodes) => prevNodes.filter((n) => n.id !== id));
+            setEdges((prevEdges) =>
+              prevEdges.filter((e) => e.source !== id && e.target !== id)
+            );
           }, 0);
-          return nodes; // Return unchanged nodes for now
+          return nodes;
 
         case "logId":
           console.log("Node ID:", id);
@@ -228,50 +224,140 @@ export default function App() {
   }, []);
 
   const handleTraversalTrigger = useCallback(async () => {
-    // Find all node IDs that have outgoing edges
-    const nodesWithOutgoingEdges = new Set(edges.map(edge => edge.source));
+    /* -----------------------------------------------------------
+     * 1. Find “sink” nodes (nodes that have no outgoing edges)
+     * --------------------------------------------------------- */
+    const nodesWithOutgoing = new Set(edges.map(e => e.source));
 
-    // Sink nodes = nodes that are not sources in any edge
     const sinkNodeIds = nodes
-      .map(node => node.id)
-      .filter(id => !nodesWithOutgoingEdges.has(id));
+      .map(n => n.id)
+      .filter(id => !nodesWithOutgoing.has(id));
 
     if (sinkNodeIds.length === 0) {
       console.warn('⚠️ No sink nodes found.');
       return;
     }
 
+    /* -----------------------------------------------------------
+     * 2. Evaluate the graph
+     *    –  pass ws.current so non-client nodes run on the server
+     * --------------------------------------------------------- */
     const { nodes: n2, edges: e2 } = await runFlow({
       nodes,
       edges,
       targetIds: sinkNodeIds,
       setNodes,
-      nodeRegistry,  // ✅ must be included
+      nodeRegistry,
+      ws: ws.current,                       // ← NEW
       options: { traversal: false, evaluation: true, delay: 500 },
     });
 
+    /* -----------------------------------------------------------
+     * 3. Commit updated state to React Flow
+     * --------------------------------------------------------- */
     setNodes(n2);
     setEdges(e2);
-  }, [nodes, edges, nodeRegistry]);
+  }, [nodes, edges, nodeRegistry, setNodes, ws]);
 
-  const nodeTypes = useMemo(() => {
-    if (!nodeRegistry) return {};
+  const saveAs = useCallback(async () => {
+    const name = prompt("Save as… (without .json)");
+    if (!name) return;
 
-    const nt = {};
-    for (const [type, def] of Object.entries(nodeRegistry.nodes)) {
-      nt[type] = def.clientOnly
-        ? (props) => (
+    const isDev = window.location.hostname === 'localhost';
+    const apiBase = isDev ? 'http://localhost:5001' : '';
+
+    const res = await fetch(`${apiBase}/save-workflow`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: name.endsWith('.json') ? name : `${name}.json`,
+        nodes,
+        edges,
+      }),
+    });
+
+    if (res.ok) {
+      setWorkflowFile(`${name}.json`);
+      setIsDirty(false);
+      alert("Workflow saved!");
+    } else {
+      alert("Save failed");
+    }
+  }, [nodes, edges]);   // dependencies
+
+  useEffect(() => {
+    // after registry is ready, pull default workflow
+    if (!nodeRegistry) return;
+
+    (async () => {
+      const isDev = window.location.hostname === 'localhost';
+      const apiBase = isDev ? 'http://localhost:5001' : '';
+
+      try {
+        const res = await fetch(`${apiBase}/workflows/default.json`);
+        if (!res.ok) throw new Error("workflow fetch failed");
+        const wf = await res.json();
+        setWorkflowFile("default.json");
+        setIsDirty(false);
+        setNodes(wf.nodes);
+        setEdges(wf.edges);
+      } catch (err) {
+        console.warn("No default workflow, starting blank.");
+        setNodes([]);
+        setEdges([]);
+      }
+    })();
+  }, [nodeRegistry]);
+
+  useEffect(() => {
+    if (workflowFile !== 'default.json') {
+      setIsDirty(true);
+    }
+  }, [nodes, edges]);
+
+  useEffect(() => {
+    const desired = {};
+    const target = nodeTypesRef.current;
+
+    if (!nodeRegistry) return;
+
+    for (const n of nodes) {
+      const type = n.data?.type;
+      const meta = n.data?.meta || nodeRegistry?.nodes?.[type];
+
+      if (!type || !meta) {
+        if (type && !desired[type]) {
+          desired[type] = () => (
+            <div className="p-4 border-2 border-red-600 bg-yellow-50 text-sm rounded shadow">
+              <p>⚠️ Unknown node type:</p>
+              <p><code>{type}</code></p>
+            </div>
+          );
+        }
+        continue;
+      }
+
+      // Register this type once
+      if (!desired[type]) {
+        desired[type] = (props) => (
           <MetaNode
             {...props}
-            nodeRegistry={nodeRegistry}                   // ✅ pass registry directly
+            nodeRegistry={{ nodes: { [type]: meta } }} // scoped registry for MetaNode
             onFieldChange={stableHandleFieldChange}
             onAction={stableHandleNodeAction}
           />
-        )
-        : () => <div>Backend node</div>;
+        );
+      }
     }
-    return nt;
-  }, [nodeRegistry, stableHandleFieldChange, stableHandleNodeAction]);
+
+    // remove keys that no longer exist
+    Object.keys(target).forEach((k) => {
+      if (!(k in desired)) delete target[k];
+    });
+
+    // add / update keys
+    Object.assign(target, desired);
+  }, [nodeRegistry, nodes, stableHandleFieldChange, stableHandleNodeAction]);
 
   useEffect(() => {
     async function initNodeTypes() {
@@ -296,109 +382,51 @@ export default function App() {
   }, [setEdges]);
 
   useEffect(() => {
-    if (!nodeRegistry) return; // wait until registry is ready
+    //if (!nodeRegistry) return; // wait until registry is ready
 
-    setNodes([
-      // {
-      //   id: 'trigger',
-      //   type: 'triggerNode',
-      //   position: { x: 0, y: 0 },
-      //   data: { onTrigger: handleTrigger },
-      // },
-      // {
-      //   id: 'input',
-      //   type: 'textInput',
-      //   position: { x: 200, y: 0 },
-      //   data: { prompt: '', onChange: handlePromptChange },
-      // },
-      // {
-      //   id: 'gen',
-      //   type: 'imageGen',
-      //   position: { x: 400, y: 0 },
-      //   data: { model: 'gpt-img-1', onModelChange: handleModelChange },
-      // },
-      // {
-      //   id: 'display',
-      //   type: 'imageDisplay',
-      //   position: { x: 600, y: 0 },
-      //   data: { imgUrl: '' },
-      //   width: 300,
-      //   height: 300,
-      // },
-      // {
-      //   id: 'nodeHeaderDemo',
-      //   type: 'nodeHeaderDemo',
-      //   position: { x: 800, y: 0 },
-      // },
-      // {
-      //   id: 'numNode',
-      //   type: 'numNode',
-      //   position: { x: 1000, y: 0 },
-      //   data: { value: 0 },
-      // },
-      // {
-      //   id: 'sumNode',
-      //   type: 'sumNode',
-      //   position: { x: 1200, y: 0 },
-      //   data: { value: 0 },
-      // },
+    //setNodes([
       // { id: 'a', type: 'number', data: { type: 'number', value: 0 }, position: { x: 0, y: 0 } },
       // { id: 'b', type: 'number', data: { type: 'number', value: 0 }, position: { x: 0, y: 200 } },
-      //{ id: 'c', type: 'sumNode', data: { type: 'sumNode', value: 0 }, position: { x: 300, y: 100 } },
-      // { id: 'a', type: 'numNode', data: { value: 0 }, position: { x: 0, y: 0 } },
-      // { id: 'b', type: 'numNode', data: { value: 0 }, position: { x: 0, y: 200 } },
-      // { id: 'c', type: 'sumNode', data: { value: 0 }, position: { x: 300, y: 100 } },
-      // { id: 'd', type: 'numNode', data: { value: 0 }, position: { x: 0, y: 400 } },
-      // { id: 'e', type: 'sumNode', data: { value: 0 }, position: { x: 600, y: 400 } },
-      // { id: 'f', type: 'textOutput', data: { value: 0 }, position: { x: 900, y: 400 } },
-    ]);
-
-    setEdges([
       // {
-      //   id: 'a->c',
+      //   id: 'a',
+      //   type: 'number',
+      //   data: { type: 'number', value: 42 },
+      //   position: { x: 0, y: 0 },
+      // },
+      // {
+      //   id: 'fake-123',
+      //   type: 'imaginary_node_type',
+      //   data: { type: 'imaginary_node_type', label: 'Oops' },
+      //   position: { x: 200, y: 0 },
+      // },
+    //]);
+
+    //setEdges([
+      // {
+      //   id: 'a->b',
       //   type: 'data',
       //   data: { key: 'value' },
       //   source: 'a',
       //   target: 'c',
       //   targetHandle: 'x',
       // },
-      // {
-      //   id: 'b->c',
-      //   type: 'data',
-      //   data: { key: 'value' },
-      //   source: 'b',
-      //   target: 'c',
-      //   targetHandle: 'y',
-      // },
-      // {
-      //   id: 'c->e',
-      //   type: 'data',
-      //   data: { key: 'value' },
-      //   source: 'c',
-      //   target: 'e',
-      //   targetHandle: 'x',
-      // },
-      // {
-      //   id: 'd->e',
-      //   type: 'data',
-      //   data: { key: 'value' },
-      //   source: 'd',
-      //   target: 'e',
-      //   targetHandle: 'y',
-      // },
-      // {
-      //   id: 'e->f',
-      //   type: 'data',
-      //   data: { key: 'value' },
-      //   source: 'e',
-      //   target: 'f',
-      //   targetHandle: 'value',
-      // },
-    ]);
+    //]);
   }, [nodeRegistry]);
 
+  // Remove this later? Or only run in dev?
+  // useEffect(() => {
+  //   const existingTypes = new Set(nodes.map(n => n.data?.type));
+  //   const registeredTypes = new Set(Object.keys(nodeRegistry?.nodes || {}));
+
+  //   for (const t of existingTypes) {
+  //     if (!registeredTypes.has(t)) {
+  //       console.warn(`⚠️ Node type "${t}" used in canvas but missing from registry`);
+  //     }
+  //   }
+  // }, [nodeRegistry, nodes]);
+
   useEffect(() => {
-    // update to use 	const isDev = import.meta.env.DEV; as we do in localNodeRegistry.js
+    // update to use const isDev = import.meta.env.DEV; as we do in localNodeRegistry.js
     const isDev = window.location.hostname === 'localhost';
 
     const wsUrl = isDev
@@ -482,7 +510,7 @@ export default function App() {
         {
           ...params,
           type: 'data',
-          data: { key: 'value' }, // 🧠 Trick DataEdge into rendering
+          data: { key: 'value' }, // Trick DataEdge into rendering
         },
         eds
       )
@@ -505,7 +533,7 @@ export default function App() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
-              nodeTypes={nodeTypes}
+              nodeTypes={nodeTypesRef.current}
               edgeTypes={edgeTypes}
               fitView
               nodesFocusable={true}
@@ -516,7 +544,39 @@ export default function App() {
               <Controls />
               <MiniMap />
               <Background variant="dots" gap={12} size={1} />
-              <Panel position="top-right">
+              <Panel position="bottom-center">
+                <button
+                  onClick={handleTraversalTrigger}
+                  className="!bg-blue-500 text-white px-4 py-2 rounded shadow hover:bg-blue-700 transition"
+                >
+                  Run All
+                </button>
+              </Panel>
+              <Panel position="top-right" className="flex items-center gap-2 p-2">
+                <button
+                  className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
+                  onClick={saveAs}
+                  title="Save workflow as new file"
+                >
+                  💾 Save&nbsp;As
+                </button>
+
+                <button
+                  className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
+                  onClick={async () => {
+                    const fresh = await loadNodeRegistry({ forceRefresh: true });
+
+                    // Only update registry if contents changed
+                    if (fresh.version !== nodeRegistry?.version) {
+                      setNodeRegistry(fresh); // triggers useMemo, node types reinit
+                    } else {
+                      console.log("Registry unchanged — skipping update");
+                    }
+                  }}
+                >
+                  <RefreshCcw className="text-black h-4 w-4" /> Refresh Nodes
+                </button>
+
                 <div
                   style={{
                     width: '16px',
@@ -527,44 +587,28 @@ export default function App() {
                   title={wsConnected ? 'Connected to server' : 'Disconnected'}
                 />
               </Panel>
-              <Panel position="bottom-center">
-                <button
-                  onClick={handleTraversalTrigger}
-                  className="!bg-blue-500 text-white px-4 py-2 rounded shadow hover:bg-blue-700 transition"
-                >
-                  Run All
-                </button>
-              </Panel>
-              <Panel position="top-right" className="p-2">
-                <button
-                  className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
-                  onClick={async () => {
-                    const fresh = await loadNodeRegistry({ forceRefresh: true });
-                    setNodeRegistry(fresh); // 🔁 triggers useMemo, node types re-init
-                    setNodes((nodes) => [...nodes]); // 🌀 force re-render of all nodes
-                  }}
-                >
-                  <RefreshCcw className="text-black h-4 w-4" /> Refresh Nodes
-                </button>
+              <Panel position="top-left" className="flex items-center gap-2 p-2">
+                <div className="">
+                  <DropdownMenu modal={false}>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
+                      >
+                        <Plus className="text-black h-4 w-4" /> Add node
+                      </button>
+                    </DropdownMenuTrigger>
+
+                    <DropdownMenuContent className="w-32">
+                      {nodeRegistry && <AddNodeMenuItems registry={nodeRegistry} />}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+
+                <div className="text-xs text-gray-500 ml-2 select-none">
+                  {workflowFile}{isDirty ? "*" : ""}
+                </div>
               </Panel>
             </ReactFlow>
-            {/* Move dropdown outside of ReactFlow to avoid aria-hidden conflicts */}
-            <div className="absolute top-2 left-2 z-10">
-              <DropdownMenu modal={false}>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
-                  >
-                    <Plus className="text-black h-4 w-4" /> Add node
-                  </button>
-                </DropdownMenuTrigger>
-
-                <DropdownMenuContent className="w-32">
-                  {nodeRegistry && <AddNodeMenuItems registry={nodeRegistry} />}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-
             {/* <div className="absolute top-4 left-4 z-50 bg-teal-500 text-white p-4 rounded-lg shadow-lg">
               Image Generation Workflow
             </div> */}
