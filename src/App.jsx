@@ -40,17 +40,27 @@ function useNodeFactory(registry) {
       return;
     }
 
+    // Build complete data object with all defaults from schema
+    const dataWithDefaults = {
+      type,
+      value: 0,
+      meta, // ✅ embed schema directly so node can self-render
+    };
+
+    // Add all param defaults
+    if (meta.params) {
+      for (const [key, spec] of Object.entries(meta.params)) {
+        dataWithDefaults[key] = spec.default ?? null;
+      }
+    }
+
     rf.setNodes((nodes) => [
       ...nodes,
       {
         id: nanoid(6),
         type,
         position: pos,
-        data: {
-          type,
-          value: 0,
-          meta, // ✅ embed schema directly so node can self-render
-        },
+        data: dataWithDefaults,
       },
     ]);
   };
@@ -64,39 +74,20 @@ function AddNodeMenuItems({ registry }) {
   return (
     <>
       {Object.entries(registry.nodes).map(([type, def]) =>
-        def.clientOnly ? (
-          <DropdownMenuItem
-            key={type}
-            onSelect={(e) => {
-              e.preventDefault();
-              add(type);
-            }}
-          >
-            {def.displayName || type}
-          </DropdownMenuItem>
-        ) : null
+      (
+        <DropdownMenuItem
+          key={type}
+          onSelect={(e) => {
+            e.preventDefault();
+            add(type);
+          }}
+        >
+          {def.displayName || type}
+        </DropdownMenuItem>
+      )
       )}
     </>
   );
-}
-
-function makeNodeTypes(registry, onFieldChange, onAction) {
-  if (!registry) return {};
-
-  const nt = {};
-  for (const [type, def] of Object.entries(registry.nodes)) {
-    nt[type] = def.clientOnly
-      ? (props) => (
-        <MetaNode
-          {...props}
-          nodeRegistry={registry}
-          onFieldChange={onFieldChange}
-          onAction={onAction}
-        />
-      )
-      : () => <div>Backend node</div>;
-  }
-  return nt;
 }
 
 export default function App() {
@@ -108,11 +99,11 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const ws = useRef(null);
+  const isInitialLoad = useRef(true);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
-  const nodeTypesRef = useRef({});
   const promptRef = useRef('');
   const modelRef = useRef('gpt-image-1');
 
@@ -126,6 +117,11 @@ export default function App() {
         const oldVal = node.data?.[field];
         if (oldVal === value) {
           return node;
+        }
+
+        // Mark as dirty when field value changes
+        if (!isInitialLoad.current) {
+          setIsDirty(true);
         }
 
         return {
@@ -158,11 +154,19 @@ export default function App() {
           for (const [k, v] of Object.entries(def.params || {})) {
             defaults[k] = v.default ?? null;
           }
+          // Mark as dirty when resetting node
+          if (!isInitialLoad.current) {
+            setIsDirty(true);
+          }
           return nodes.map((n) =>
             n.id === id ? { ...n, data: { ...n.data, ...defaults } } : n
           );
 
         case "delete":
+          // Mark as dirty when deleting node
+          if (!isInitialLoad.current) {
+            setIsDirty(true);
+          }
           // Defer deletion to next tick to allow React Flow to finish processing events
           setTimeout(() => {
             setNodes((prevNodes) => prevNodes.filter((n) => n.id !== id));
@@ -186,6 +190,31 @@ export default function App() {
   const stableHandleNodeAction = useCallback((action, id) => {
     handleNodeActionRef.current(action, id);
   }, []);
+
+  // Create a single stable nodeTypes object that never changes
+  const nodeTypes = useMemo(() => {
+    if (!nodeRegistry) return {};
+
+    // Create a single generic component for all MetaNode types
+    const GenericMetaNode = (props) => (
+      <MetaNode
+        {...props}
+        nodeRegistry={nodeRegistry}
+        onFieldChange={stableHandleFieldChange}
+        onAction={stableHandleNodeAction}
+      />
+    );
+
+    // Create stable nodeTypes object with all possible node types
+    const types = {};
+    if (nodeRegistry.nodes) {
+      for (const nodeType of Object.keys(nodeRegistry.nodes)) {
+        types[nodeType] = GenericMetaNode;
+      }
+    }
+
+    return types;
+  }, [nodeRegistry]); // Only depend on registry, not on callbacks or nodes
 
   const handlePromptChange = useCallback((prompt) => {
     promptRef.current = prompt;
@@ -224,8 +253,13 @@ export default function App() {
   }, []);
 
   const handleTraversalTrigger = useCallback(async () => {
+    if (isInitialLoad.current) {
+      console.warn('⚠️ handleTraversalTrigger called during initial load! Ignoring...');
+      return;
+    }
+
     /* -----------------------------------------------------------
-     * 1. Find “sink” nodes (nodes that have no outgoing edges)
+     * 1. Find "sink" nodes (nodes that have no outgoing edges)
      * --------------------------------------------------------- */
     const nodesWithOutgoing = new Set(edges.map(e => e.source));
 
@@ -248,7 +282,7 @@ export default function App() {
       targetIds: sinkNodeIds,
       setNodes,
       nodeRegistry,
-      ws: ws.current,                       // ← NEW
+      ws: ws.current,
       options: { traversal: false, evaluation: true, delay: 500 },
     });
 
@@ -285,6 +319,33 @@ export default function App() {
     }
   }, [nodes, edges]);   // dependencies
 
+  const onConnect = useCallback(
+    (params) => {
+      const { source, sourceHandle, target, targetHandle } = params;
+      console.log('CONNECTING... params', params);
+
+      const sourceNode = nodes.find((n) => n.id === source);
+      const sourceType = sourceNode?.data?.type;
+      const def = nodeRegistry?.nodes?.[sourceType];
+
+      const showLabel = def?.showOutputOnEdge !== false;
+
+      console.log('CONNECTING... showLabel', showLabel);
+
+      setEdges((eds) =>
+        addEdge(
+          {
+            ...params,
+            type: 'data',
+            data: showLabel ? { key: 'value', label: '' } : 'value',
+          },
+          eds
+        )
+      );
+    },
+    [nodes, nodeRegistry]
+  );
+
   useEffect(() => {
     // after registry is ready, pull default workflow
     if (!nodeRegistry) return;
@@ -299,65 +360,58 @@ export default function App() {
         const wf = await res.json();
         setWorkflowFile("default.json");
         setIsDirty(false);
-        setNodes(wf.nodes);
+
+        // Merge loaded nodes with schema defaults to ensure complete data structure
+        const nodesWithDefaults = wf.nodes.map(node => {
+          const def = nodeRegistry.nodes[node.data?.type];
+          if (!def || !def.params) {
+            // For nodes without params, just keep type
+            return {
+              ...node,
+              data: { type: node.data?.type }
+            };
+          }
+
+          // Build clean data object with only schema-defined fields
+          const completeData = { type: node.data?.type };
+
+          for (const [key, spec] of Object.entries(def.params)) {
+            // Use the value from loaded data if it exists and is a param, otherwise use default
+            if (key in node.data) {
+              completeData[key] = node.data[key];
+            } else {
+              completeData[key] = spec.default ?? null;
+            }
+          }
+
+          return {
+            ...node,
+            data: completeData
+          };
+        });
+
+        setNodes(nodesWithDefaults);
         setEdges(wf.edges);
+
+        // Mark initial load as complete
+        setTimeout(() => {
+          isInitialLoad.current = false;
+        }, 1000);
       } catch (err) {
         console.warn("No default workflow, starting blank.");
         setNodes([]);
         setEdges([]);
+        isInitialLoad.current = false;
       }
     })();
   }, [nodeRegistry]);
 
   useEffect(() => {
-    if (workflowFile !== 'default.json') {
+    // Mark as dirty when nodes or edges change, but not on initial load
+    if (!isInitialLoad.current) {
       setIsDirty(true);
     }
   }, [nodes, edges]);
-
-  useEffect(() => {
-    const desired = {};
-    const target = nodeTypesRef.current;
-
-    if (!nodeRegistry) return;
-
-    for (const n of nodes) {
-      const type = n.data?.type;
-      const meta = n.data?.meta || nodeRegistry?.nodes?.[type];
-
-      if (!type || !meta) {
-        if (type && !desired[type]) {
-          desired[type] = () => (
-            <div className="p-4 border-2 border-red-600 bg-yellow-50 text-sm rounded shadow">
-              <p>⚠️ Unknown node type:</p>
-              <p><code>{type}</code></p>
-            </div>
-          );
-        }
-        continue;
-      }
-
-      // Register this type once
-      if (!desired[type]) {
-        desired[type] = (props) => (
-          <MetaNode
-            {...props}
-            nodeRegistry={{ nodes: { [type]: meta } }} // scoped registry for MetaNode
-            onFieldChange={stableHandleFieldChange}
-            onAction={stableHandleNodeAction}
-          />
-        );
-      }
-    }
-
-    // remove keys that no longer exist
-    Object.keys(target).forEach((k) => {
-      if (!(k in desired)) delete target[k];
-    });
-
-    // add / update keys
-    Object.assign(target, desired);
-  }, [nodeRegistry, nodes, stableHandleFieldChange, stableHandleNodeAction]);
 
   useEffect(() => {
     async function initNodeTypes() {
@@ -380,50 +434,6 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [setEdges]);
-
-  useEffect(() => {
-    //if (!nodeRegistry) return; // wait until registry is ready
-
-    //setNodes([
-      // { id: 'a', type: 'number', data: { type: 'number', value: 0 }, position: { x: 0, y: 0 } },
-      // { id: 'b', type: 'number', data: { type: 'number', value: 0 }, position: { x: 0, y: 200 } },
-      // {
-      //   id: 'a',
-      //   type: 'number',
-      //   data: { type: 'number', value: 42 },
-      //   position: { x: 0, y: 0 },
-      // },
-      // {
-      //   id: 'fake-123',
-      //   type: 'imaginary_node_type',
-      //   data: { type: 'imaginary_node_type', label: 'Oops' },
-      //   position: { x: 200, y: 0 },
-      // },
-    //]);
-
-    //setEdges([
-      // {
-      //   id: 'a->b',
-      //   type: 'data',
-      //   data: { key: 'value' },
-      //   source: 'a',
-      //   target: 'c',
-      //   targetHandle: 'x',
-      // },
-    //]);
-  }, [nodeRegistry]);
-
-  // Remove this later? Or only run in dev?
-  // useEffect(() => {
-  //   const existingTypes = new Set(nodes.map(n => n.data?.type));
-  //   const registeredTypes = new Set(Object.keys(nodeRegistry?.nodes || {}));
-
-  //   for (const t of existingTypes) {
-  //     if (!registeredTypes.has(t)) {
-  //       console.warn(`⚠️ Node type "${t}" used in canvas but missing from registry`);
-  //     }
-  //   }
-  // }, [nodeRegistry, nodes]);
 
   useEffect(() => {
     // update to use const isDev = import.meta.env.DEV; as we do in localNodeRegistry.js
@@ -489,6 +499,8 @@ export default function App() {
           setLoading(false);
           setErrorMsg(message.message);
           alert(message.message);
+        } else if (message.type === 'node-result') {
+          console.log('✅ Node result:', message);
         } else {
           console.warn('Unhandled message type:', message);
         }
@@ -502,19 +514,6 @@ export default function App() {
         socket.close();
       }
     };
-  }, []);
-
-  const onConnect = useCallback((params) => {
-    setEdges((eds) =>
-      addEdge(
-        {
-          ...params,
-          type: 'data',
-          data: { key: 'value' }, // Trick DataEdge into rendering
-        },
-        eds
-      )
-    );
   }, []);
 
   if (!nodeRegistry) {
@@ -533,7 +532,7 @@ export default function App() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
-              nodeTypes={nodeTypesRef.current}
+              nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               fitView
               nodesFocusable={true}
@@ -550,6 +549,77 @@ export default function App() {
                   className="!bg-blue-500 text-white px-4 py-2 rounded shadow hover:bg-blue-700 transition"
                 >
                   Run All
+                </button>
+                <button
+                  onClick={() => {
+                    // Create a clean workflow without pre-calculated values
+                    setNodes([
+                      {
+                        id: 'num-1',
+                        type: 'number',
+                        position: { x: 0, y: 0 },
+                        data: { type: 'number', value: 3 }
+                      },
+                      {
+                        id: 'num-2',
+                        type: 'number',
+                        position: { x: 0, y: 200 },
+                        data: { type: 'number', value: 5 }
+                      },
+                      {
+                        id: 'num-3',
+                        type: 'number',
+                        position: { x: 0, y: 400 },
+                        data: { type: 'number', value: 2 }
+                      },
+                      {
+                        id: 'sum-1',
+                        type: 'sum',
+                        position: { x: 300, y: 100 },
+                        data: { type: 'sum' }  // No result/value
+                      },
+                      {
+                        id: 'sum-2',
+                        type: 'sum',
+                        position: { x: 300, y: 300 },
+                        data: { type: 'sum' }  // No result/value
+                      },
+                      {
+                        id: 'res-1',
+                        type: 'display_text',
+                        position: { x: 600, y: 100 },
+                        data: { type: 'display_text' }
+                      },
+                      {
+                        id: 'res-2',
+                        type: 'display_text',
+                        position: { x: 600, y: 300 },
+                        data: { type: 'display_text' }
+                      }
+                    ]);
+                    setEdges([
+                      { id: 'e1', source: 'num-1', target: 'sum-1', targetHandle: 'x', type: 'data', data: { key: 'value', label: '3' } },
+                      { id: 'e2', source: 'num-2', target: 'sum-1', targetHandle: 'y', type: 'data', data: { key: 'value', label: '5' } },
+                      { id: 'e3', source: 'num-2', target: 'sum-2', targetHandle: 'x', type: 'data', data: { key: 'value', label: '' } },
+                      { id: 'e4', source: 'num-3', target: 'sum-2', targetHandle: 'y' },
+                      { id: 'e5', source: 'sum-1', target: 'res-1', targetHandle: 'value', type: 'data', data: { key: 'value', label: 'result' } },
+                      { id: 'e6', source: 'sum-2', target: 'res-2', targetHandle: 'value' }
+                    ]);
+                  }}
+                  className="!bg-green-500 text-white px-4 py-2 rounded shadow hover:bg-green-700 transition ml-2"
+                >
+                  Reset Clean
+                </button>
+                <button
+                  onClick={() => {
+                    if (!isDirty || window.confirm('Are you sure you want to clear all nodes and edges? This cannot be undone.')) {
+                      setNodes([]);
+                      setEdges([]);
+                    }
+                  }}
+                  className="!bg-red-500 text-white px-4 py-2 rounded shadow hover:bg-red-700 transition ml-2"
+                >
+                  Clear Canvas
                 </button>
               </Panel>
               <Panel position="top-right" className="flex items-center gap-2 p-2">
@@ -645,3 +715,4 @@ export default function App() {
     </>
   );
 }
+

@@ -12,12 +12,16 @@ import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
 
 import NumberField from '@/widgets/NumberField';
 import TextReadonlyField from '@/widgets/TextReadonlyField';
+import TextAreaField from '@/widgets/TextAreaField';
+import SelectField from '@/widgets/SelectField';
 import { cn } from "@/lib/utils";
 
 /* Map UI keywords to field widgets */
 const widgetMap = {
 	number: NumberField,
 	text_readonly: TextReadonlyField,
+	text_textarea: TextAreaField,
+	select: SelectField,
 	// Add future widget types here (text, select, slider, etc.)
 };
 

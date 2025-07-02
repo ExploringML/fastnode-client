@@ -6,7 +6,8 @@ import { BaseHandle } from "@/components/base-handle";
 
 const flexDirections = {
   top: "flex-col",
-  right: "flex-row-reverse justify-end",
+  //right: "flex-row-reverse justify-end",
+  right: "flex-row-reverse",
   bottom: "flex-col-reverse justify-end",
   left: "flex-row",
 };

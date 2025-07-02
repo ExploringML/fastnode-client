@@ -45,6 +45,14 @@ function evaluateClientNode(node, def, inputVals) {
 		return str;
 	}
 
+	if (type === 'textarea_input') {
+		return node.data.text;
+	}
+
+	if (type === 'select') {
+		return node.data.value;
+	}
+
 	console.warn(`⚠️ No evaluator for client-only node type: ${type}`);
 	return null;
 }
@@ -216,13 +224,20 @@ export async function runFlow({
 		});
 	}
 
-	const updatedEdges = edges.map(e => ({
-		...e,
-		data: {
-			...e.data,
-			label: (nodeMap[e.source]?.data?.value ?? '').toString(),
-		},
-	}));
+	const updatedEdges = edges.map(e => {
+		const sourceNode = nodeMap[e.source];
+		const sourceType = sourceNode?.data?.type;
+		const def = nodeRegistry?.nodes?.[sourceType];
+		const showLabel = def?.showOutputOnEdge !== false;
+
+		return {
+			...e,
+			data: {
+				...e.data,
+				label: showLabel ? (sourceNode?.data?.value ?? '').toString() : '',
+			},
+		};
+	});
 
 	return { nodes: Object.values(nodeMap), edges: updatedEdges };
 }
