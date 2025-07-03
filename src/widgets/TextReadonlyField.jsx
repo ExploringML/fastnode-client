@@ -7,10 +7,10 @@ export default function TextReadonlyField({
 	spec,
 }) {
 	return (
-		<div className="max-w-[150px] text-sm">
+		<div className="p-2 text-sm">
 			<div
 				id={`${id}-${field}`}
-				className="py-0.5 h-7 whitespace-nowrap overflow-hidden text-ellipsis"
+				className="py-0.5 h-7 w-full"
 				title={value ?? spec.default ?? ""}
 			>
 				{value ?? spec.default ?? ""}

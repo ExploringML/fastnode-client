@@ -283,7 +283,7 @@ export default function App() {
       setNodes,
       nodeRegistry,
       ws: ws.current,
-      options: { traversal: false, evaluation: true, delay: 500 },
+      options: { traversal: false, evaluation: true, delay: 250 },
     });
 
     /* -----------------------------------------------------------
@@ -501,6 +501,14 @@ export default function App() {
           alert(message.message);
         } else if (message.type === 'node-result') {
           console.log('✅ Node result:', message);
+        } else if (message.type === 'node-progress') {
+          // Optional: log or update UI
+          console.log(`🔄 Progress [${message.requestId}]: ${message.progress}% — ${message.message}`);
+
+          // Optional: update node state
+          // e.g., update progress bar or show a spinner
+          // You'll likely need to track per-node progress in state like:
+          // setNodeProgress({ [message.requestId]: { progress: message.progress, message: message.message } })
         } else {
           console.warn('Unhandled message type:', message);
         }
@@ -598,17 +606,67 @@ export default function App() {
                       }
                     ]);
                     setEdges([
-                      { id: 'e1', source: 'num-1', target: 'sum-1', targetHandle: 'x', type: 'data', data: { key: 'value', label: '3' } },
-                      { id: 'e2', source: 'num-2', target: 'sum-1', targetHandle: 'y', type: 'data', data: { key: 'value', label: '5' } },
-                      { id: 'e3', source: 'num-2', target: 'sum-2', targetHandle: 'x', type: 'data', data: { key: 'value', label: '' } },
+                      { id: 'e1', source: 'num-1', target: 'sum-1', targetHandle: 'x', type: 'data', data: { key: 'value' } },
+                      { id: 'e2', source: 'num-2', target: 'sum-1', targetHandle: 'y', type: 'data', data: { key: 'value' } },
+                      { id: 'e3', source: 'num-2', target: 'sum-2', targetHandle: 'x', type: 'data', data: { key: 'value' } },
                       { id: 'e4', source: 'num-3', target: 'sum-2', targetHandle: 'y' },
-                      { id: 'e5', source: 'sum-1', target: 'res-1', targetHandle: 'value', type: 'data', data: { key: 'value', label: 'result' } },
+                      { id: 'e5', source: 'sum-1', target: 'res-1', targetHandle: 'value', type: 'data', data: { key: 'value' } },
                       { id: 'e6', source: 'sum-2', target: 'res-2', targetHandle: 'value' }
                     ]);
                   }}
                   className="!bg-green-500 text-white px-4 py-2 rounded shadow hover:bg-green-700 transition ml-2"
                 >
                   Reset Clean
+                </button>
+                <button
+                  onClick={() => {
+                    // Create image generation workflow
+                    // Check what node types are available
+                    console.log('🔍 Available node types:', Object.keys(nodeRegistry?.nodes || {}));
+
+                    // Use simple known types first, then upgrade when we know what's available
+                    setNodes([
+                      {
+                        id: 'a',
+                        type: 'textarea_input',
+                        position: { x: 100, y: 30 },
+                        data: { type: 'textarea_input', text: 'A cat with multi-color fur.' }
+                      },
+                      {
+                        id: 'b',
+                        type: 'image_model_selector',
+                        position: { x: 160, y: 280 },
+                        data: { type: 'image_model_selector', model: 'gpt-image-1' }
+                      },
+                      {
+                        id: 'c',
+                        type: 'generate_image',
+                        position: { x: 600, y: 130 },
+                        data: { type: 'generate_image' }
+                      }
+                    ]);
+                    setEdges([
+                      {
+                        id: 'e1',
+                        source: 'a',
+                        sourceHandle: 'prompt',
+                        target: 'c',
+                        targetHandle: 'prompt',
+                        type: 'data'
+                      },
+                      {
+                        id: 'e2',
+                        source: 'b',
+                        sourceHandle: 'model',
+                        target: 'c',
+                        targetHandle: 'model',
+                        type: 'data'
+                      }
+                    ]);
+                  }}
+                  className="!bg-purple-500 text-white px-4 py-2 rounded shadow hover:bg-purple-700 transition ml-2"
+                >
+                  Load Image Gen
                 </button>
                 <button
                   onClick={() => {
@@ -623,6 +681,51 @@ export default function App() {
                 </button>
               </Panel>
               <Panel position="top-right" className="flex items-center gap-2 p-2">
+                <button
+                  className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
+                  onClick={async () => {
+                    let filename = prompt("Enter workflow filename (e.g. demo or demo.json)");
+                    if (!filename) return;
+
+                    if (!filename.endsWith('.json')) {
+                      filename += '.json';
+                    }
+
+                    const isDev = window.location.hostname === 'localhost';
+                    const apiBase = isDev ? 'http://localhost:5001' : '';
+
+                    try {
+                      const res = await fetch(`${apiBase}/workflows/${filename}`);
+                      if (!res.ok) throw new Error("Workflow fetch failed");
+                      const wf = await res.json();
+
+                      setWorkflowFile(filename);
+                      setIsDirty(false);
+
+                      const nodesWithDefaults = wf.nodes.map(node => {
+                        const def = nodeRegistry.nodes[node.data?.type];
+                        if (!def || !def.params) {
+                          return { ...node, data: { type: node.data?.type } };
+                        }
+
+                        const completeData = { type: node.data?.type };
+                        for (const [key, spec] of Object.entries(def.params)) {
+                          completeData[key] = key in node.data ? node.data[key] : (spec.default ?? null);
+                        }
+
+                        return { ...node, data: completeData };
+                      });
+
+                      setNodes(nodesWithDefaults);
+                      setEdges(wf.edges);
+                    } catch (err) {
+                      alert("❌ Failed to load workflow.");
+                      console.error(err);
+                    }
+                  }}
+                >
+                  📂 Load Workflow
+                </button>
                 <button
                   className="flex items-center gap-1 rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700 transition"
                   onClick={saveAs}

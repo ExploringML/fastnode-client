@@ -49,8 +49,13 @@ function evaluateClientNode(node, def, inputVals) {
 		return node.data.text;
 	}
 
-	if (type === 'select') {
-		return node.data.value;
+	// if (type === 'select') {
+	// 	return node.data.value;
+	// }
+
+	// NEW: image model selector just outputs currently selected model key
+	if (type === 'image_model_selector') {
+		return node.data.model;
 	}
 
 	console.warn(`⚠️ No evaluator for client-only node type: ${type}`);
@@ -58,46 +63,90 @@ function evaluateClientNode(node, def, inputVals) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 2. NEW helper: call backend via WebSocket                           */
+/* 2. NEW helper: call backend via WebSocket with progress support     */
 /* ------------------------------------------------------------------ */
-function evaluateServerNode(ws, node, inputVals, timeoutMs = 5000) {
+function evaluateServerNode(ws, node, inputVals, setNodes, maxTimeoutMs = 300000) { // 5 min max
 	return new Promise((resolve, reject) => {
 		if (!ws || ws.readyState !== WebSocket.OPEN) {
-			return reject(new Error('WebSocket not open'));
+			return reject(new Error('WebSocket connection is not open'));
 		}
 
 		const reqId = nanoid(8);
+		let progressTimeoutHandle;
+		let maxTimeoutHandle;
+
+		// FALLBACK: Absolute maximum timeout (5 minutes)
+		maxTimeoutHandle = setTimeout(() => {
+			cleanup();
+			reject(new Error(`Absolute timeout reached (${maxTimeoutMs / 1000}s) - cancelling operation`));
+		}, maxTimeoutMs);
+
+		const cleanup = () => {
+			clearTimeout(progressTimeoutHandle);
+			clearTimeout(maxTimeoutHandle);
+			ws.removeEventListener('message', onMessage);
+
+			// Clear progress indicators from node
+			setNodes && setNodes(ns => ns.map(n =>
+				n.id === node.id
+					? { ...n, data: { ...n.data, progress: undefined, status: undefined } }
+					: n
+			));
+		};
+
+		// Progress timeout (resets every time we get progress)
+		const resetProgressTimeout = () => {
+			clearTimeout(progressTimeoutHandle);
+			progressTimeoutHandle = setTimeout(() => {
+				cleanup();
+				reject(new Error('No progress updates received - connection may be lost'));
+			}, 30000); // 30s between progress updates
+		};
 
 		const onMessage = (ev) => {
 			try {
 				const msg = JSON.parse(ev.data);
-				if (msg.type === 'node-result' && msg.requestId === reqId) {
-					ws.removeEventListener('message', onMessage);
-					if ('error' in msg) reject(new Error(msg.error));
-					else resolve(msg.result);
+
+				if (msg.requestId === reqId || (!msg.requestId && msg.nodeId === node.id)) {
+					if (msg.type === 'node-progress') {
+						// ✅ Server is alive and working - reset progress timeout
+						resetProgressTimeout();
+
+						// Update UI with progress
+						setNodes && setNodes(ns => ns.map(n =>
+							n.id === node.id
+								? { ...n, data: { ...n.data, progress: msg.progress, status: msg.message || 'Processing...' } }
+								: n
+						));
+
+					} else if (msg.type === 'node-result') {
+						cleanup();
+						if ('error' in msg) reject(new Error(msg.error));
+						else resolve(msg.result);
+
+					} else if (msg.type === 'node-error') {
+						cleanup();
+						reject(new Error(msg.error || 'Server returned error'));
+					}
 				}
-			} catch {
-				/* ignore non-JSON frames */
+			} catch (e) {
+				// Ignore malformed messages, don't crash
+				console.warn('Failed to parse WebSocket message:', e);
 			}
 		};
 
 		ws.addEventListener('message', onMessage);
+		resetProgressTimeout(); // Start progress monitoring
 
-		// fire request
+		// Send initial request
 		ws.send(JSON.stringify({
 			type: 'evaluate-node',
 			requestId: reqId,
 			nodeType: node.data.type,
 			nodeId: node.id,
 			inputs: inputVals,
-			params: node.data          // send full data payload
+			params: node.data
 		}));
-
-		// safety timeout
-		setTimeout(() => {
-			ws.removeEventListener('message', onMessage);
-			reject(new Error('Node evaluation timeout'));
-		}, timeoutMs);
 	});
 }
 
@@ -167,7 +216,7 @@ async function evaluateNode({
 		newVal = evaluateClientNode(node, def, inputVals);
 	} else {
 		try {
-			newVal = await evaluateServerNode(opts.ws, node, inputVals);
+			newVal = await evaluateServerNode(opts.ws, node, inputVals, setNodes);
 		} catch (err) {
 			console.error(`🧨 Remote eval failed for ${node.id}:`, err);
 			newVal = null;
@@ -205,7 +254,7 @@ export async function runFlow({
 	targetIds,
 	setNodes,
 	nodeRegistry,
-	ws,                              // NEW  ← pass ws.current
+	ws,
 	options = { traversal: true, evaluation: true, delay: 300 },
 }) {
 	const graph = buildInputGraph(edges);
