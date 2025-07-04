@@ -740,8 +740,10 @@ export default function App() {
                     const fresh = await loadNodeRegistry({ forceRefresh: true });
 
                     // Only update registry if contents changed
-                    if (fresh.version !== nodeRegistry?.version) {
+                    const isDev = import.meta.env.DEV;
+                    if (fresh.version !== nodeRegistry?.version || isDev) {
                       setNodeRegistry(fresh); // triggers useMemo, node types reinit
+                      console.log("Registry updated", fresh);
                     } else {
                       console.log("Registry unchanged — skipping update");
                     }

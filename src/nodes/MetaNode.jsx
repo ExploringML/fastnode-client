@@ -33,6 +33,7 @@ export default function MetaNode({ id, data, selected, nodeRegistry, onFieldChan
 	const renderCountRef = useRef(0);
 	renderCountRef.current++;
 
+	// registered node type (e.g. "display_text")
 	const type = data?.type;
 
 	// Early error handling
@@ -135,19 +136,25 @@ export default function MetaNode({ id, data, selected, nodeRegistry, onFieldChan
 					{Object.entries(params).map(([key, spec]) => {
 						const Widget = widgetMap[spec.ui];
 
+						//if (data.type === 'display_text') {
+							//console.log("DEBUG: data", data);
+							//console.log("DEBUG: key", key);
+							//console.log("DEBUG: spec", spec);
+						//}
+
 						// ▸ pull whatever is stored for this field
-						let value = data.value?.[key] ?? data[key] ?? spec.default;
+						let value = data[key] ?? spec.default;
 
 						// ▸ if the widget expects plain text but the value is an object
 						//   shaped like { value: "…" }, unwrap it
-						if (
-							spec.ui === 'text_readonly' &&
-							value &&
-							typeof value === 'object' &&
-							'value' in value
-						) {
-							value = value.value;
-						}
+						// if (
+						// 	spec.ui === 'text_readonly' &&
+						// 	value &&
+						// 	typeof value === 'object' &&
+						// 	'value' in value
+						// ) {
+						// 	value = value.value;
+						// }
 
 						return Widget ? (
 							<Widget

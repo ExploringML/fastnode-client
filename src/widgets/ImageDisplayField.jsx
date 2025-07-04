@@ -1,8 +1,6 @@
 import React from "react";
 
 function ImageDisplayField({ id, field = "image", value, spec }) {
-	// console.log("ImageDisplayField", id, field, value, spec);
-
 	if (!value) {
 		return (
 			<div className="min-w-[20px] min-h-[20px] flex-1 flex items-center justify-center text-sm text-gray-400">

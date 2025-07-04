@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from "react";
-import { Textarea } from "@/components/ui/textarea";
 
 export default function TextAreaField({
 	id,

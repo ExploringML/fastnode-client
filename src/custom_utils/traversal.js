@@ -26,46 +26,39 @@ const flush = () => new Promise(r => requestAnimationFrame(r));
 function evaluateClientNode(node, def, inputVals) {
 	const type = node.data?.type;
 
-	if (type === 'number') {
-		return node.data.value ?? 0;
-	}
-
+	if (type === 'number') return node.data.value ?? 0;
 	if (type === 'sum') {
-		const x = Number(inputVals['x']) || 0;
-		const y = Number(inputVals['y']) || 0;
+		const x = Number(inputVals.x) || 0;
+		const y = Number(inputVals.y) || 0;
 		const result = x + y;
 		node.data.result = result;
 		return result;
 	}
-
 	if (type === 'display_text') {
-		const val = inputVals['value'];
-		const str = typeof val === 'number' ? val.toString() : val ?? '';
-		node.data.text = str;
-		return str;
+		const val = inputVals.value;
+		return typeof val === 'number' ? val.toString() : val ?? '';
 	}
-
-	if (type === 'textarea_input') {
-		return node.data.text;
-	}
-
-	// if (type === 'select') {
-	// 	return node.data.value;
-	// }
-
-	// NEW: image model selector just outputs currently selected model key
-	if (type === 'image_model_selector') {
-		return node.data.model;
-	}
+	if (type === 'textarea_input') return node.data.text;
+	if (type === 'image_model_selector') return node.data.model;
 
 	console.warn(`⚠️ No evaluator for client-only node type: ${type}`);
 	return null;
 }
 
 /* ------------------------------------------------------------------ */
-/* 2. NEW helper: call backend via WebSocket with progress support     */
+/* 2. Helper: evaluate server node via WebSocket with progress support*/
 /* ------------------------------------------------------------------ */
-function evaluateServerNode(ws, node, inputVals, setNodes, maxTimeoutMs = 300000) { // 5 min max
+/* ------------------------------------------------------------------ */
+/* 2. Helper: evaluate server node via WebSocket with progress support*/
+/* ------------------------------------------------------------------ */
+function evaluateServerNode(
+	ws,
+	node,
+	inputVals,
+	setNodes,
+	nodeMap,           // pass nodeMap for persistence
+	maxTimeoutMs = 300000
+) {
 	return new Promise((resolve, reject) => {
 		if (!ws || ws.readyState !== WebSocket.OPEN) {
 			return reject(new Error('WebSocket connection is not open'));
@@ -75,83 +68,132 @@ function evaluateServerNode(ws, node, inputVals, setNodes, maxTimeoutMs = 300000
 		let progressTimeoutHandle;
 		let maxTimeoutHandle;
 
-		// FALLBACK: Absolute maximum timeout (5 minutes)
-		maxTimeoutHandle = setTimeout(() => {
-			cleanup();
-			reject(new Error(`Absolute timeout reached (${maxTimeoutMs / 1000}s) - cancelling operation`));
-		}, maxTimeoutMs);
-
+		/* ----- cleanup helper ---------------------------------------- */
 		const cleanup = () => {
 			clearTimeout(progressTimeoutHandle);
 			clearTimeout(maxTimeoutHandle);
 			ws.removeEventListener('message', onMessage);
-
-			// Clear progress indicators from node
-			setNodes && setNodes(ns => ns.map(n =>
-				n.id === node.id
-					? { ...n, data: { ...n.data, progress: undefined, status: undefined } }
-					: n
-			));
+			// clear progress UI
+			setNodes &&
+				setNodes((ns) =>
+					ns.map((n) =>
+						n.id === node.id
+							? {
+								...n,
+								data: { ...n.data, progress: undefined, status: undefined },
+							}
+							: n
+					)
+				);
 		};
 
-		// Progress timeout (resets every time we get progress)
+		/* ----- fail-safe timeouts ------------------------------------ */
+		maxTimeoutHandle = setTimeout(() => {
+			cleanup();
+			reject(new Error(`Absolute timeout (${maxTimeoutMs / 1000}s) reached`));
+		}, maxTimeoutMs);
+
 		const resetProgressTimeout = () => {
 			clearTimeout(progressTimeoutHandle);
 			progressTimeoutHandle = setTimeout(() => {
 				cleanup();
-				reject(new Error('No progress updates received - connection may be lost'));
-			}, 30000); // 30s between progress updates
+				reject(
+					new Error('No progress updates received – connection may be lost')
+				);
+			}, 30000); // 30 s
 		};
 
+		/* ----- message handler --------------------------------------- */
 		const onMessage = (ev) => {
 			try {
 				const msg = JSON.parse(ev.data);
 
 				if (msg.requestId === reqId || (!msg.requestId && msg.nodeId === node.id)) {
 					if (msg.type === 'node-progress') {
-						// ✅ Server is alive and working - reset progress timeout
 						resetProgressTimeout();
-
-						// Update UI with progress
-						setNodes && setNodes(ns => ns.map(n =>
-							n.id === node.id
-								? { ...n, data: { ...n.data, progress: msg.progress, status: msg.message || 'Processing...' } }
-								: n
-						));
-
+						setNodes &&
+							setNodes((ns) =>
+								ns.map((n) =>
+									n.id === node.id
+										? {
+											...n,
+											data: {
+												...n.data,
+												progress: msg.progress,
+												status: msg.message || 'Processing…',
+											},
+										}
+										: n
+								)
+							);
 					} else if (msg.type === 'node-result') {
 						cleanup();
-						if ('error' in msg) reject(new Error(msg.error));
-						else resolve(msg.result);
 
+						if ('error' in msg) return reject(new Error(msg.error));
+						const result = msg.result;
+
+						/* ── unwrap or wrap into fields object ───────────────── */
+						const fields =
+							result && typeof result === 'object' && !Array.isArray(result)
+								? result
+								: { value: result };
+
+						/* 1 ▸ update UI immediately */
+						setNodes &&
+							setNodes((ns) =>
+								ns.map((n) =>
+									n.id === node.id
+										? { ...n, data: { ...n.data, ...fields } }
+										: n
+								)
+							);
+
+						/* 2 ▸ persist to nodeMap for final runFlow commit */
+						const nodeData = nodeMap[node.id].data;
+						for (const [k, v] of Object.entries(fields)) nodeData[k] = v;
+
+						console.log("222. FFF evaluateServerNode", fields);
+						/* 🔑 ensure a scalar .value for downstream nodes */
+						if (typeof fields === 'object') {
+							if ('value' in fields) nodeData.value = fields.value;
+							else if ('response' in fields) nodeData.value = fields.response;
+							else if ('result' in fields) nodeData.value = fields.result;
+							else if ('image' in fields) nodeData.image = fields.image;
+						} else {
+							nodeData.value = fields;
+						}
+
+						/* 3 ▸ hand structured fields back to evaluateNode */
+						resolve(fields);
 					} else if (msg.type === 'node-error') {
 						cleanup();
 						reject(new Error(msg.error || 'Server returned error'));
 					}
 				}
 			} catch (e) {
-				// Ignore malformed messages, don't crash
 				console.warn('Failed to parse WebSocket message:', e);
 			}
 		};
 
 		ws.addEventListener('message', onMessage);
-		resetProgressTimeout(); // Start progress monitoring
+		resetProgressTimeout();
 
-		// Send initial request
-		ws.send(JSON.stringify({
-			type: 'evaluate-node',
-			requestId: reqId,
-			nodeType: node.data.type,
-			nodeId: node.id,
-			inputs: inputVals,
-			params: node.data
-		}));
+		/* ----- send request ------------------------------------------ */
+		ws.send(
+			JSON.stringify({
+				type: 'evaluate-node',
+				requestId: reqId,
+				nodeType: node.data.type,
+				nodeId: node.id,
+				inputs: inputVals,
+				params: node.data,
+			})
+		);
 	});
 }
 
 /* ------------------------------------------------------------------ */
-/* 3. Recursive evaluation                                            */
+/* 3. Recursive evaluation                                           */
 /* ------------------------------------------------------------------ */
 async function evaluateNode({
 	id,
@@ -178,66 +220,131 @@ async function evaluateNode({
 		return 0;
 	}
 
-	/* 1. traversal highlight (unchanged) */
+	/* 1. traversal highlight (visual only) ------------------------- */
 	if (opts.traversal) {
-		setNodes(ns => ns.map(n =>
-			n.id === id ? { ...n, data: { ...n.data, traversing: true } } : n
-		));
-		await flush(); await delay(opts.delay);
-		setNodes(ns => ns.map(n =>
-			n.id === id ? { ...n, data: { ...n.data, traversing: false } } : n
-		));
+		setNodes((ns) =>
+			ns.map((n) =>
+				n.id === id ? { ...n, data: { ...n.data, traversing: true } } : n
+			)
+		);
+		await flush();
+		await delay(opts.delay);
+		setNodes((ns) =>
+			ns.map((n) =>
+				n.id === id ? { ...n, data: { ...n.data, traversing: false } } : n
+			)
+		);
 		await flush();
 	}
 
-	/* 2. recurse upstream */
+	/* 2. recurse upstream ------------------------------------------ */
 	const inputs = graph.get(id) ?? [];
 
 	if (memo.has(id)) {
 		for (const { source } of inputs) {
-			await evaluateNode({ id: source, graph, nodeMap, setNodes, nodeRegistry, opts, visited, memo });
+			await evaluateNode({
+				id: source,
+				graph,
+				nodeMap,
+				setNodes,
+				nodeRegistry,
+				opts,
+				visited,
+				memo,
+			});
 		}
 		return memo.get(id);
 	}
 
 	for (const { source } of inputs) {
-		await evaluateNode({ id: source, graph, nodeMap, setNodes, nodeRegistry, opts, visited, memo });
+		await evaluateNode({
+			id: source,
+			graph,
+			nodeMap,
+			setNodes,
+			nodeRegistry,
+			opts,
+			visited,
+			memo,
+		});
 	}
 
-	/* 3. build inputVals */
+	/* 3. build inputVals ------------------------------------------- */
 	const inputVals = {};
 	for (const { source, handle } of inputs) {
-		inputVals[handle] = nodeMap[source]?.data?.value;
+		const rawVal = memo.get(source) ?? nodeMap[source]?.data?.value;
+		inputVals[handle] = (
+			rawVal && typeof rawVal === 'object' && !Array.isArray(rawVal)
+				? rawVal.value ?? rawVal.response ?? rawVal
+				: rawVal
+		);
 	}
 
-	/* 4. evaluate */
+	// const inputVals = {};
+	// for (const { source, handle } of inputs) {
+	// 	inputVals[handle] = nodeMap[source]?.data?.value;
+	// }
+
+	/* 4. evaluate --------------------------------------------------- */
 	let newVal;
 	if (def.clientOnly) {
 		newVal = evaluateClientNode(node, def, inputVals);
 	} else {
 		try {
-			newVal = await evaluateServerNode(opts.ws, node, inputVals, setNodes);
+			newVal = await evaluateServerNode(
+				opts.ws,
+				node,
+				inputVals,
+				setNodes,
+				nodeMap   // <- NEW
+			);
 		} catch (err) {
 			console.error(`🧨 Remote eval failed for ${node.id}:`, err);
 			newVal = null;
 		}
 	}
-	nodeMap[id].data.value = newVal;
 
-	/* 5. evaluation highlight (unchanged) */
+	// nodeMap[id].data.value = newVal;
+	// if (def.params?.image) nodeMap[id].data.image = newVal;
+
+	/* 5. evaluation highlight -------------------------------------- */
+	
 	if (opts.evaluation) {
-		setNodes(ns => ns.map(n =>
-			n.id === id ? { ...n, data: { ...n.data, evaluating: true } } : n
-		));
-		await flush(); await delay(opts.delay);
-		setNodes(ns => ns.map(n =>
-			n.id === id ? { ...n, data: { ...n.data, evaluating: false, value: newVal } } : n
-		));
+		// start of highlight (unchanged)
+		setNodes(ns =>
+			ns.map(n =>
+				n.id === id ? { ...n, data: { ...n.data, evaluating: true } } : n
+			)
+		);
+		await flush();
+		await delay(opts.delay);
+
+		// ✅ end-of-evaluation  ─ merge nodeMap[id].data so image & other
+		//    fields survive, plus turn evaluating flag off
+		setNodes(ns =>
+			ns.map(n =>
+				n.id === id
+					? {
+						...n,
+						data: {
+							...n.data,            // existing transient fields
+							...nodeMap[id].data,  // ← authoritative fields (image, tokens, …)
+							evaluating: false,
+						},
+					}
+					: n
+			)
+		);
 		await flush();
 	} else {
-		setNodes(ns => ns.map(n =>
-			n.id === id ? { ...n, data: { ...n.data, value: newVal } } : n
-		));
+		// no highlight mode  ─ just merge authoritative data
+		setNodes(ns =>
+			ns.map(n =>
+				n.id === id
+					? { ...n, data: { ...n.data, ...nodeMap[id].data } }
+					: n
+			)
+		);
 	}
 
 	memo.set(id, newVal);
@@ -246,7 +353,7 @@ async function evaluateNode({
 }
 
 /* ------------------------------------------------------------------ */
-/* 4. Public entry: runFlow                                           */
+/* 4. Public entry: runFlow                                          */
 /* ------------------------------------------------------------------ */
 export async function runFlow({
 	nodes,
@@ -258,7 +365,7 @@ export async function runFlow({
 	options = { traversal: true, evaluation: true, delay: 300 },
 }) {
 	const graph = buildInputGraph(edges);
-	const nodeMap = Object.fromEntries(nodes.map(n => [n.id, { ...n }]));
+	const nodeMap = Object.fromEntries(nodes.map((n) => [n.id, { ...n }]));
 	const memo = new Map();
 
 	for (const tid of targetIds) {
@@ -268,12 +375,12 @@ export async function runFlow({
 			nodeMap,
 			setNodes,
 			nodeRegistry,
-			opts: { ...options, ws },   // thread WS down
+			opts: { ...options, ws },
 			memo,
 		});
 	}
 
-	const updatedEdges = edges.map(e => {
+	const updatedEdges = edges.map((e) => {
 		const sourceNode = nodeMap[e.source];
 		const sourceType = sourceNode?.data?.type;
 		const def = nodeRegistry?.nodes?.[sourceType];
