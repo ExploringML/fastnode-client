@@ -37,6 +37,7 @@ function evaluateClientNode(node, def, inputVals) {
 	}
 	if (type === 'textarea_input') return node.data.text;
 	if (type === 'image_model_selector') return node.data.model;
+	if (type === 'load_sd_model') return node.data.model;
 
 	console.warn(`⚠️ No evaluator for client-only node type: ${type}`);
 	return null;
