@@ -48,15 +48,132 @@ function evaluateClientNode(node, def, inputVals) {
 /* ------------------------------------------------------------------ */
 /* 2. Helper: evaluate server node via WebSocket with progress support*/
 /* ------------------------------------------------------------------ */
-/* ------------------------------------------------------------------ */
-/* 2. Helper: evaluate server node via WebSocket with progress support*/
-/* ------------------------------------------------------------------ */
+function getDirectTargets(sourceId, edges) {
+	if (!edges) return []; // Add a guard for safety
+	return edges
+		.filter(e => e.source === sourceId)
+		.map(e => e.target);
+}
+
+function makeOnMessage({ reqId, node, edges, setNodes, nodeMap, resolve, reject, cleanup, resetProgressTimeout }) {
+	return function onMessage(ev) {
+		try {
+			const msg = JSON.parse(ev.data);
+
+			if (msg.requestId === reqId || (!msg.requestId && msg.nodeId === node.id)) {
+				if (msg.type === 'node-stream') {
+					console.log("333. node-stream", msg);
+					const increment = msg.data ?? '';
+					const downstreamTargets = getDirectTargets(msg.nodeId, edges);
+
+					// This is the key: we update React's state for the UI, and ALSO update
+					// the 'nodeMap' that the rest of the runFlow evaluation relies on.
+					setNodes(ns =>
+						ns.map(n => {
+							// 1. For the source LLM node, accumulate the result in its 'response' field.
+							if (n.id === msg.nodeId) {
+								const newText = (n.data.response || '') + increment;
+
+								// Update the internal map for the evaluation process
+								if (nodeMap[n.id]) {
+									nodeMap[n.id].data.response = newText;
+								}
+
+								// Update the React state for the UI
+								return { ...n, data: { ...n.data, response: newText } };
+							}
+
+							// 2. For any connected target nodes, update their 'value' field.
+							if (downstreamTargets.includes(n.id)) {
+								const newText = (n.data.value || '') + increment;
+
+								// Update the internal map for the evaluation process
+								if (nodeMap[n.id]) {
+									nodeMap[n.id].data.value = newText;
+								}
+
+								// Update the React state for the UI
+								return { ...n, data: { ...n.data, value: newText } };
+							}
+
+							return n;
+						})
+					);
+					return; // End processing for this message
+				}
+
+				if (msg.type === 'node-progress') {
+					resetProgressTimeout();
+					setNodes(ns =>
+						ns.map(n =>
+							n.id === node.id
+								? {
+									...n,
+									data: {
+										...n.data,
+										progress: msg.progress,
+										status: msg.message || 'Processing…',
+									},
+								}
+								: n
+						)
+					);
+					return;
+				}
+
+				if (msg.type === 'node-result') {
+					cleanup();
+
+					if ('error' in msg) return reject(new Error(msg.error));
+					const result = msg.result;
+
+					const fields =
+						result && typeof result === 'object' && !Array.isArray(result)
+							? result
+							: { value: result };
+
+					setNodes(ns =>
+						ns.map(n =>
+							n.id === node.id ? { ...n, data: { ...n.data, ...fields } } : n
+						)
+					);
+
+					const nodeData = nodeMap[node.id].data;
+					for (const [k, v] of Object.entries(fields)) nodeData[k] = v;
+
+					console.log("222. FFF evaluateServerNode", fields);
+					if (typeof fields === 'object') {
+						if ('value' in fields) nodeData.value = fields.value;
+						else if ('response' in fields) nodeData.value = fields.response;
+						else if ('result' in fields) nodeData.value = fields.result;
+						else if ('image' in fields) nodeData.image = fields.image;
+					} else {
+						nodeData.value = fields;
+					}
+
+					resolve(fields);
+					return;
+				}
+
+				if (msg.type === 'node-error') {
+					cleanup();
+					reject(new Error(msg.error || 'Server returned error'));
+					return;
+				}
+			}
+		} catch (e) {
+			console.warn('Failed to parse WebSocket message:', e);
+		}
+	};
+}
+
 function evaluateServerNode(
 	ws,
 	node,
 	inputVals,
 	setNodes,
-	nodeMap,           // pass nodeMap for persistence
+	nodeMap,
+	edges,
 	maxTimeoutMs = 300000
 ) {
 	return new Promise((resolve, reject) => {
@@ -67,125 +184,53 @@ function evaluateServerNode(
 		const reqId = nanoid(8);
 		let progressTimeoutHandle;
 		let maxTimeoutHandle;
+		let onMessage; // declared here so we can refer to the exact instance for removal
 
-		/* ----- cleanup helper ---------------------------------------- */
 		const cleanup = () => {
 			clearTimeout(progressTimeoutHandle);
 			clearTimeout(maxTimeoutHandle);
 			ws.removeEventListener('message', onMessage);
-			// clear progress UI
+
 			setNodes &&
-				setNodes((ns) =>
-					ns.map((n) =>
+				setNodes(ns =>
+					ns.map(n =>
 						n.id === node.id
-							? {
-								...n,
-								data: { ...n.data, progress: undefined, status: undefined },
-							}
+							? { ...n, data: { ...n.data, progress: undefined, status: undefined } }
 							: n
 					)
 				);
 		};
 
-		/* ----- fail-safe timeouts ------------------------------------ */
-		maxTimeoutHandle = setTimeout(() => {
-			cleanup();
-			reject(new Error(`Absolute timeout (${maxTimeoutMs / 1000}s) reached`));
-		}, maxTimeoutMs);
-
 		const resetProgressTimeout = () => {
 			clearTimeout(progressTimeoutHandle);
 			progressTimeoutHandle = setTimeout(() => {
 				cleanup();
-				reject(
-					new Error('No progress updates received – connection may be lost')
-				);
-			}, 30000); // 30 s
+				reject(new Error('No progress updates received – connection may be lost'));
+			}, 30000);
 		};
 
-		/* ----- message handler --------------------------------------- */
-		const onMessage = (ev) => {
-			try {
-				const msg = JSON.parse(ev.data);
-
-				if (msg.requestId === reqId || (!msg.requestId && msg.nodeId === node.id)) {
-					if (msg.type === 'node-progress') {
-						resetProgressTimeout();
-						setNodes &&
-							setNodes((ns) =>
-								ns.map((n) =>
-									n.id === node.id
-										? {
-											...n,
-											data: {
-												...n.data,
-												progress: msg.progress,
-												status: msg.message || 'Processing…',
-											},
-										}
-										: n
-								)
-							);
-					} else if (msg.type === 'node-result') {
-						cleanup();
-
-						if ('error' in msg) return reject(new Error(msg.error));
-						const result = msg.result;
-
-						/* ── unwrap or wrap into fields object ───────────────── */
-						const fields =
-							result && typeof result === 'object' && !Array.isArray(result)
-								? result
-								: { value: result };
-
-						/* 1 ▸ update UI immediately */
-						setNodes &&
-							setNodes((ns) =>
-								ns.map((n) =>
-									n.id === node.id
-										? { ...n, data: { ...n.data, ...fields } }
-										: n
-								)
-							);
-
-						/* 2 ▸ persist to nodeMap for final runFlow commit */
-						const nodeData = nodeMap[node.id].data;
-						for (const [k, v] of Object.entries(fields)) nodeData[k] = v;
-
-						console.log("222. FFF evaluateServerNode", fields);
-						/* 🔑 ensure a scalar .value for downstream nodes */
-						if (typeof fields === 'object') {
-							if ('value' in fields) nodeData.value = fields.value;
-							else if ('response' in fields) nodeData.value = fields.response;
-							else if ('result' in fields) nodeData.value = fields.result;
-							else if ('image' in fields) nodeData.image = fields.image;
-						} else {
-							nodeData.value = fields;
-						}
-
-						/* 3 ▸ hand structured fields back to evaluateNode */
-						resolve(fields);
-					} else if (msg.type === 'node-error') {
-						cleanup();
-						reject(new Error(msg.error || 'Server returned error'));
-					}
-				}
-			} catch (e) {
-				console.warn('Failed to parse WebSocket message:', e);
-			}
-		};
+		onMessage = makeOnMessage({
+			reqId,
+			node,
+			edges,
+			setNodes,
+			nodeMap,
+			resolve,
+			reject,
+			cleanup,
+			resetProgressTimeout,
+		});
 
 		ws.addEventListener('message', onMessage);
 		resetProgressTimeout();
 
-		/* ----- send request ------------------------------------------ */
 		ws.send(
 			JSON.stringify({
 				type: 'evaluate-node',
 				requestId: reqId,
 				nodeType: node.data.type,
 				nodeId: node.id,
-				inputs: inputVals,
+				inputs: { ...inputVals, id: node.id },
 				params: node.data,
 			})
 		);
@@ -199,6 +244,7 @@ async function evaluateNode({
 	id,
 	graph,
 	nodeMap,
+	edges,
 	setNodes,
 	nodeRegistry,
 	opts,
@@ -289,6 +335,9 @@ async function evaluateNode({
 	let newVal;
 	if (def.clientOnly) {
 		newVal = evaluateClientNode(node, def, inputVals);
+
+		// This saves the result for client nodes, preventing it from being lost.
+		nodeMap[id].data.value = newVal;
 	} else {
 		try {
 			newVal = await evaluateServerNode(
@@ -296,7 +345,8 @@ async function evaluateNode({
 				node,
 				inputVals,
 				setNodes,
-				nodeMap   // <- NEW
+				nodeMap,
+				edges
 			);
 		} catch (err) {
 			console.error(`🧨 Remote eval failed for ${node.id}:`, err);
@@ -373,6 +423,7 @@ export async function runFlow({
 			id: tid,
 			graph,
 			nodeMap,
+			edges,
 			setNodes,
 			nodeRegistry,
 			opts: { ...options, ws },

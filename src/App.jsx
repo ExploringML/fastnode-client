@@ -501,6 +501,8 @@ export default function App() {
           alert(message.message);
         } else if (message.type === 'node-result') {
           console.log('✅ Node result:', message);
+        } else if (message.type === 'node-stream') {
+          console.log('🔄 Node stream:', message);
         } else if (message.type === 'node-progress') {
           // Optional: log or update UI
           console.log(`🔄 Progress [${message.requestId}]: ${message.progress}% — ${message.message}`);
