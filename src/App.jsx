@@ -90,6 +90,13 @@ function AddNodeMenuItems({ registry }) {
   );
 }
 
+function getDirectTargets(sourceId, edges) {
+  if (!edges) return []; // Add a guard for safety
+  return edges
+    .filter(e => e.source === sourceId)
+    .map(e => e.target);
+}
+
 export default function App() {
   const [workflowFile, setWorkflowFile] = useState('default.json');
   const [isDirty, setIsDirty] = useState(false);
@@ -106,6 +113,7 @@ export default function App() {
 
   const promptRef = useRef('');
   const modelRef = useRef('gpt-image-1');
+  const edgesRef = useRef(edges);
 
   // Handle field changes from MetaNode using the proper useNodesState mechanism
   const handleFieldChangeRef = useRef();
@@ -258,11 +266,47 @@ export default function App() {
       return;
     }
 
-    /* -----------------------------------------------------------
-     * 1. Find "sink" nodes (nodes that have no outgoing edges)
-     * --------------------------------------------------------- */
-    const nodesWithOutgoing = new Set(edges.map(e => e.source));
+    /* ------------------------------------------------------------------
+     * ✅ STEP 1: CLEAR TARGETS OF STREAMING NODES
+     * ------------------------------------------------------------------ */
 
+    // Find the types of all nodes that are marked as streaming
+    const streamingNodeTypes = new Set();
+    if (nodeRegistry?.nodes) {
+      for (const [type, def] of Object.entries(nodeRegistry.nodes)) {
+        if (def.isStreaming) {
+          streamingNodeTypes.add(type);
+        }
+      }
+    }
+
+    // Find all nodes on the canvas that are of a streaming type
+    const streamingNodeIds = new Set(
+      nodes.filter(n => streamingNodeTypes.has(n.data.type)).map(n => n.id)
+    );
+
+    // Find all edges that start from one of those streaming nodes
+    const targetsToClear = new Set(
+      edges.filter(e => streamingNodeIds.has(e.source)).map(e => e.target)
+    );
+
+    // If we found any targets, update the state to clear their 'value'
+    if (targetsToClear.size > 0) {
+      setNodes(nds =>
+        nds.map(n => {
+          if (targetsToClear.has(n.id)) {
+            return { ...n, data: { ...n.data, value: '' } };
+          }
+          return n;
+        })
+      );
+    }
+
+    /* ------------------------------------------------------------------
+     * STEP 2: PROCEED WITH THE ORIGINAL EVALUATION LOGIC
+     * ------------------------------------------------------------------ */
+
+    const nodesWithOutgoing = new Set(edges.map(e => e.source));
     const sinkNodeIds = nodes
       .map(n => n.id)
       .filter(id => !nodesWithOutgoing.has(id));
@@ -272,10 +316,6 @@ export default function App() {
       return;
     }
 
-    /* -----------------------------------------------------------
-     * 2. Evaluate the graph
-     *    –  pass ws.current so non-client nodes run on the server
-     * --------------------------------------------------------- */
     const { nodes: n2, edges: e2 } = await runFlow({
       nodes,
       edges,
@@ -286,11 +326,9 @@ export default function App() {
       options: { traversal: false, evaluation: true, delay: 250 },
     });
 
-    /* -----------------------------------------------------------
-     * 3. Commit updated state to React Flow
-     * --------------------------------------------------------- */
     setNodes(n2);
     setEdges(e2);
+
   }, [nodes, edges, nodeRegistry, setNodes, ws]);
 
   const saveAs = useCallback(async () => {
@@ -345,6 +383,11 @@ export default function App() {
     },
     [nodes, nodeRegistry]
   );
+
+  // Keep a ref to the latest edges to avoid re-running the WebSocket effect
+  useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
 
   useEffect(() => {
     // after registry is ready, pull default workflow
@@ -436,11 +479,9 @@ export default function App() {
   }, [setEdges]);
 
   useEffect(() => {
-    // update to use const isDev = import.meta.env.DEV; as we do in localNodeRegistry.js
     const isDev = window.location.hostname === 'localhost';
-
     const wsUrl = isDev
-      ? 'ws://localhost:5001/ws' // your dev backend
+      ? 'ws://localhost:5001/ws'
       : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 
     const socket = new WebSocket(wsUrl);
@@ -463,56 +504,89 @@ export default function App() {
     socket.onmessage = async (event) => {
       try {
         let message;
-
         if (typeof event.data === 'string') {
           message = JSON.parse(event.data);
         } else if (event.data instanceof Blob) {
           const text = await event.data.text();
           message = JSON.parse(text);
         } else {
-          console.warn('Unknown WebSocket data type:', event.data);
           return;
         }
 
-        if (message.type === 'image' && message.encoding === 'base64') {
-          const img = `data:image/png;base64,${message.data}`;
-          setImageData(img);
-          setLoading(false);
-          setErrorMsg('');
+        switch (message.type) {
+          case 'node-stream': {
+            const { nodeId, data: increment } = message;
+            if (!nodeId || !increment) return;
 
-          setNodes((nds) =>
-            nds.map((n) =>
-              n.id === 'display'
-                ? { ...n, data: { ...n.data, imgUrl: img } }
-                : n
-            )
-          );
-        } else if (message.type === 'status') {
-          if (message.status === 'generating') {
-            setLoading(true);
-            setErrorMsg('');
-          } else if (message.status === 'error') {
-            setLoading(false);
-            setErrorMsg(message.message || 'Unknown error');
+            const downstreamTargets = getDirectTargets(nodeId, edgesRef.current);
+            if (downstreamTargets.length === 0) return;
+
+            setNodes(nds =>
+              nds.map(n => {
+                if (downstreamTargets.includes(n.id)) {
+                  const newText = (n.data.value || '') + increment;
+                  return { ...n, data: { ...n.data, value: newText } };
+                }
+                return n;
+              })
+            );
+            break;
           }
-        } else if (message.type === 'error') {
-          setLoading(false);
-          setErrorMsg(message.message);
-          alert(message.message);
-        } else if (message.type === 'node-result') {
-          console.log('✅ Node result:', message);
-        } else if (message.type === 'node-stream') {
-          console.log('🔄 Node stream:', message);
-        } else if (message.type === 'node-progress') {
-          // Optional: log or update UI
-          console.log(`🔄 Progress [${message.requestId}]: ${message.progress}% — ${message.message}`);
 
-          // Optional: update node state
-          // e.g., update progress bar or show a spinner
-          // You'll likely need to track per-node progress in state like:
-          // setNodeProgress({ [message.requestId]: { progress: message.progress, message: message.message } })
-        } else {
-          console.warn('Unhandled message type:', message);
+          case 'node-progress': {
+            const { nodeId, progress, message: statusMsg } = message;
+
+            // Find any nodes connected downstream from the node sending progress
+            const downstreamTargets = getDirectTargets(nodeId, edgesRef.current);
+
+            setNodes(ns =>
+              ns.map(n => {
+                let updatedNode = { ...n };
+                let updatedData = { ...n.data };
+
+                // Always apply the progress update to the source node
+                if (n.id === nodeId) {
+                  updatedData.progress = progress;
+                  updatedData.status = statusMsg;
+                }
+
+                // If it's the *first* progress update, clear the downstream targets
+                if (downstreamTargets.includes(n.id) && progress > 0 && progress <= 20) {
+                  updatedData.value = ''; // Clear the text content
+                }
+
+                updatedNode.data = updatedData;
+                return updatedNode;
+              })
+            );
+            break;
+          }
+
+          case 'status':
+            if (message.status === 'generating') {
+              setLoading(true);
+              setErrorMsg('');
+            } else if (message.status === 'error') {
+              setLoading(false);
+              setErrorMsg(message.message || 'Unknown error');
+            }
+            break;
+
+          case 'error':
+            setLoading(false);
+            setErrorMsg(message.message);
+            alert(message.message);
+            break;
+
+          case 'node-result':
+            // The traversal logic handles the final result.
+            // We can just log it here for debugging.
+            console.log('✅ Global listener received a final node result.');
+            break;
+
+          default:
+            console.warn('Unhandled message type:', message.type);
+            break;
         }
       } catch (err) {
         console.error('💥 Failed to parse WebSocket message:', err);

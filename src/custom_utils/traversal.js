@@ -1,15 +1,12 @@
-// traversal.js  ────────────────────────────────────────────────────────────
-// A drop-in upgrade that can evaluate non-client nodes through the backend
-// over an open WebSocket.
-// ──────────────────────────────────────────────────────────────────────────
+// traversal.js
 
-import { nanoid } from 'nanoid';   // tiny unique ids for WS request tracking
+import { nanoid } from 'nanoid';
 
 /* ------------------------------------------------------------------ */
 /* 0. Small helpers                                                   */
 /* ------------------------------------------------------------------ */
 export function buildInputGraph(edges) {
-	const g = new Map();            // targetId → [ {source, handle} ]
+	const g = new Map();
 	for (const e of edges) {
 		if (!g.has(e.target)) g.set(e.target, []);
 		g.get(e.target).push({ source: e.source, handle: e.targetHandle });
@@ -21,7 +18,7 @@ const delay = (ms = 0) => new Promise(r => setTimeout(r, ms));
 const flush = () => new Promise(r => requestAnimationFrame(r));
 
 /* ------------------------------------------------------------------ */
-/* 1. Client-side evaluators (unchanged)                              */
+/* 1. Client-side evaluators                                          */
 /* ------------------------------------------------------------------ */
 function evaluateClientNode(node, def, inputVals) {
 	const type = node.data?.type;
@@ -46,112 +43,18 @@ function evaluateClientNode(node, def, inputVals) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 2. Helper: evaluate server node via WebSocket with progress support*/
+/* 2. Helper: evaluate server node via WebSocket                      */
 /* ------------------------------------------------------------------ */
-function getDirectTargets(sourceId, edges) {
-	if (!edges) return []; // Add a guard for safety
-	return edges
-		.filter(e => e.source === sourceId)
-		.map(e => e.target);
-}
-
-function makeOnMessage({ reqId, node, edges, setNodes, nodeMap, resolve, reject, cleanup, resetProgressTimeout }) {
+function makeOnMessage({ reqId, node, resolve, reject, cleanup }) {
 	return function onMessage(ev) {
 		try {
 			const msg = JSON.parse(ev.data);
 
 			if (msg.requestId === reqId || (!msg.requestId && msg.nodeId === node.id)) {
-				if (msg.type === 'node-stream') {
-					console.log("333. node-stream", msg);
-					const increment = msg.data ?? '';
-					const downstreamTargets = getDirectTargets(msg.nodeId, edges);
-
-					// This is the key: we update React's state for the UI, and ALSO update
-					// the 'nodeMap' that the rest of the runFlow evaluation relies on.
-					setNodes(ns =>
-						ns.map(n => {
-							// 1. For the source LLM node, accumulate the result in its 'response' field.
-							if (n.id === msg.nodeId) {
-								const newText = (n.data.response || '') + increment;
-
-								// Update the internal map for the evaluation process
-								if (nodeMap[n.id]) {
-									nodeMap[n.id].data.response = newText;
-								}
-
-								// Update the React state for the UI
-								return { ...n, data: { ...n.data, response: newText } };
-							}
-
-							// 2. For any connected target nodes, update their 'value' field.
-							if (downstreamTargets.includes(n.id)) {
-								const newText = (n.data.value || '') + increment;
-
-								// Update the internal map for the evaluation process
-								if (nodeMap[n.id]) {
-									nodeMap[n.id].data.value = newText;
-								}
-
-								// Update the React state for the UI
-								return { ...n, data: { ...n.data, value: newText } };
-							}
-
-							return n;
-						})
-					);
-					return; // End processing for this message
-				}
-
-				if (msg.type === 'node-progress') {
-					resetProgressTimeout();
-					setNodes(ns =>
-						ns.map(n =>
-							n.id === node.id
-								? {
-									...n,
-									data: {
-										...n.data,
-										progress: msg.progress,
-										status: msg.message || 'Processing…',
-									},
-								}
-								: n
-						)
-					);
-					return;
-				}
-
 				if (msg.type === 'node-result') {
 					cleanup();
-
 					if ('error' in msg) return reject(new Error(msg.error));
-					const result = msg.result;
-
-					const fields =
-						result && typeof result === 'object' && !Array.isArray(result)
-							? result
-							: { value: result };
-
-					setNodes(ns =>
-						ns.map(n =>
-							n.id === node.id ? { ...n, data: { ...n.data, ...fields } } : n
-						)
-					);
-
-					const nodeData = nodeMap[node.id].data;
-					for (const [k, v] of Object.entries(fields)) nodeData[k] = v;
-
-					console.log("222. FFF evaluateServerNode", fields);
-					if (typeof fields === 'object') {
-						if ('value' in fields) nodeData.value = fields.value;
-						else if ('response' in fields) nodeData.value = fields.response;
-						else if ('result' in fields) nodeData.value = fields.result;
-						else if ('image' in fields) nodeData.image = fields.image;
-					} else {
-						nodeData.value = fields;
-					}
-
-					resolve(fields);
+					resolve(msg.result);
 					return;
 				}
 
@@ -167,62 +70,28 @@ function makeOnMessage({ reqId, node, edges, setNodes, nodeMap, resolve, reject,
 	};
 }
 
-function evaluateServerNode(
-	ws,
-	node,
-	inputVals,
-	setNodes,
-	nodeMap,
-	edges,
-	maxTimeoutMs = 300000
-) {
+function evaluateServerNode(ws, node, inputVals) {
 	return new Promise((resolve, reject) => {
 		if (!ws || ws.readyState !== WebSocket.OPEN) {
 			return reject(new Error('WebSocket connection is not open'));
 		}
 
 		const reqId = nanoid(8);
-		let progressTimeoutHandle;
-		let maxTimeoutHandle;
-		let onMessage; // declared here so we can refer to the exact instance for removal
+		let onMessage;
 
 		const cleanup = () => {
-			clearTimeout(progressTimeoutHandle);
-			clearTimeout(maxTimeoutHandle);
 			ws.removeEventListener('message', onMessage);
-
-			setNodes &&
-				setNodes(ns =>
-					ns.map(n =>
-						n.id === node.id
-							? { ...n, data: { ...n.data, progress: undefined, status: undefined } }
-							: n
-					)
-				);
-		};
-
-		const resetProgressTimeout = () => {
-			clearTimeout(progressTimeoutHandle);
-			progressTimeoutHandle = setTimeout(() => {
-				cleanup();
-				reject(new Error('No progress updates received – connection may be lost'));
-			}, 30000);
 		};
 
 		onMessage = makeOnMessage({
 			reqId,
 			node,
-			edges,
-			setNodes,
-			nodeMap,
 			resolve,
 			reject,
 			cleanup,
-			resetProgressTimeout,
 		});
 
 		ws.addEventListener('message', onMessage);
-		resetProgressTimeout();
 
 		ws.send(
 			JSON.stringify({
@@ -238,7 +107,7 @@ function evaluateServerNode(
 }
 
 /* ------------------------------------------------------------------ */
-/* 3. Recursive evaluation                                           */
+/* 3. Recursive evaluation                                            */
 /* ------------------------------------------------------------------ */
 async function evaluateNode({
 	id,
@@ -251,47 +120,51 @@ async function evaluateNode({
 	visited = new Set(),
 	memo = new Map(),
 }) {
-	if (visited.has(id)) return 0;
+	if (visited.has(id)) return;
 	visited.add(id);
 
 	const node = nodeMap[id];
 	if (!node) {
 		console.warn(`⚠️ Node with ID "${id}" is missing — skipping.`);
-		return 0;
+		return;
 	}
 
 	const def = nodeRegistry?.nodes?.[node.data?.type];
 	if (!def) {
 		console.warn(`⚠️ Missing node definition for type: ${node.data?.type}`);
-		return 0;
+		return;
 	}
 
-	/* 1. traversal highlight (visual only) ------------------------- */
+	/* ------------------------------------------------------------------
+	 * 1. Traversal Highlight (Blue Border)
+	 * ------------------------------------------------------------------ */
 	if (opts.traversal) {
-		setNodes((ns) =>
-			ns.map((n) =>
+		setNodes(ns =>
+			ns.map(n =>
 				n.id === id ? { ...n, data: { ...n.data, traversing: true } } : n
 			)
 		);
 		await flush();
 		await delay(opts.delay);
-		setNodes((ns) =>
-			ns.map((n) =>
+		setNodes(ns =>
+			ns.map(n =>
 				n.id === id ? { ...n, data: { ...n.data, traversing: false } } : n
 			)
 		);
 		await flush();
 	}
 
-	/* 2. recurse upstream ------------------------------------------ */
+	/* ------------------------------------------------------------------
+	 * 2. Recurse Upstream & Get Inputs
+	 * ------------------------------------------------------------------ */
 	const inputs = graph.get(id) ?? [];
-
-	if (memo.has(id)) {
-		for (const { source } of inputs) {
+	for (const { source } of inputs) {
+		if (!memo.has(source)) {
 			await evaluateNode({
 				id: source,
 				graph,
 				nodeMap,
+				edges,
 				setNodes,
 				nodeRegistry,
 				opts,
@@ -299,68 +172,21 @@ async function evaluateNode({
 				memo,
 			});
 		}
-		return memo.get(id);
 	}
 
-	for (const { source } of inputs) {
-		await evaluateNode({
-			id: source,
-			graph,
-			nodeMap,
-			setNodes,
-			nodeRegistry,
-			opts,
-			visited,
-			memo,
-		});
-	}
-
-	/* 3. build inputVals ------------------------------------------- */
 	const inputVals = {};
 	for (const { source, handle } of inputs) {
-		const rawVal = memo.get(source) ?? nodeMap[source]?.data?.value;
-		inputVals[handle] = (
+		const rawVal = memo.get(source);
+		inputVals[handle] =
 			rawVal && typeof rawVal === 'object' && !Array.isArray(rawVal)
 				? rawVal.value ?? rawVal.response ?? rawVal
-				: rawVal
-		);
+				: rawVal;
 	}
 
-	// const inputVals = {};
-	// for (const { source, handle } of inputs) {
-	// 	inputVals[handle] = nodeMap[source]?.data?.value;
-	// }
-
-	/* 4. evaluate --------------------------------------------------- */
-	let newVal;
-	if (def.clientOnly) {
-		newVal = evaluateClientNode(node, def, inputVals);
-
-		// This saves the result for client nodes, preventing it from being lost.
-		nodeMap[id].data.value = newVal;
-	} else {
-		try {
-			newVal = await evaluateServerNode(
-				opts.ws,
-				node,
-				inputVals,
-				setNodes,
-				nodeMap,
-				edges
-			);
-		} catch (err) {
-			console.error(`🧨 Remote eval failed for ${node.id}:`, err);
-			newVal = null;
-		}
-	}
-
-	// nodeMap[id].data.value = newVal;
-	// if (def.params?.image) nodeMap[id].data.image = newVal;
-
-	/* 5. evaluation highlight -------------------------------------- */
-	
+	/* ------------------------------------------------------------------
+	 * 3. Evaluation Highlight (Green Border) & Execution
+	 * ------------------------------------------------------------------ */
 	if (opts.evaluation) {
-		// start of highlight (unchanged)
 		setNodes(ns =>
 			ns.map(n =>
 				n.id === id ? { ...n, data: { ...n.data, evaluating: true } } : n
@@ -368,42 +194,66 @@ async function evaluateNode({
 		);
 		await flush();
 		await delay(opts.delay);
+	}
 
-		// ✅ end-of-evaluation  ─ merge nodeMap[id].data so image & other
-		//    fields survive, plus turn evaluating flag off
-		setNodes(ns =>
-			ns.map(n =>
-				n.id === id
-					? {
-						...n,
-						data: {
-							...n.data,            // existing transient fields
-							...nodeMap[id].data,  // ← authoritative fields (image, tokens, …)
-							evaluating: false,
-						},
-					}
-					: n
-			)
-		);
-		await flush();
+	let newVal;
+	if (def.clientOnly) {
+		newVal = evaluateClientNode(node, def, inputVals);
+		if (nodeMap[id]) {
+			nodeMap[id].data.value = newVal;
+		}
 	} else {
-		// no highlight mode  ─ just merge authoritative data
-		setNodes(ns =>
-			ns.map(n =>
-				n.id === id
-					? { ...n, data: { ...n.data, ...nodeMap[id].data } }
-					: n
-			)
-		);
+		try {
+			// The `await` here naturally pauses the function, keeping the
+			// green border on the streaming node until it's done.
+			newVal = await evaluateServerNode(opts.ws, node, inputVals);
+
+			const fields = newVal && typeof newVal === 'object' && !Array.isArray(newVal)
+				? newVal
+				: { value: newVal };
+
+			const nodeData = nodeMap[id].data;
+			for (const [k, v] of Object.entries(fields)) {
+				nodeData[k] = v;
+			}
+			if (typeof fields === 'object' && 'response' in fields) {
+				nodeData.value = fields.response;
+			}
+		} catch (err) {
+			console.error(`🧨 Remote eval failed for ${node.id}:`, err);
+			newVal = null;
+		}
 	}
 
 	memo.set(id, newVal);
+
+	/* ------------------------------------------------------------------
+	 * 4. Final UI Update (Removes Highlight)
+	 * ------------------------------------------------------------------ */
+	setNodes(ns =>
+		ns.map(n =>
+			n.id === id
+				? {
+					...n,
+					data: {
+						...n.data, // Keep transient fields from App.jsx
+						...nodeMap[id].data, // Overwrite with authoritative data
+						evaluating: false, // Turn off the highlight
+						progress: undefined, // Clear progress bar
+						status: undefined, // Clear status message
+					},
+				}
+				: n
+		)
+	);
+	await flush();
+
 	visited.delete(id);
 	return newVal;
 }
 
 /* ------------------------------------------------------------------ */
-/* 4. Public entry: runFlow                                          */
+/* 4. Public entry: runFlow                                           */
 /* ------------------------------------------------------------------ */
 export async function runFlow({
 	nodes,
@@ -415,7 +265,7 @@ export async function runFlow({
 	options = { traversal: true, evaluation: true, delay: 300 },
 }) {
 	const graph = buildInputGraph(edges);
-	const nodeMap = Object.fromEntries(nodes.map((n) => [n.id, { ...n }]));
+	const nodeMap = Object.fromEntries(nodes.map(n => [n.id, JSON.parse(JSON.stringify(n))]));
 	const memo = new Map();
 
 	for (const tid of targetIds) {
@@ -431,20 +281,22 @@ export async function runFlow({
 		});
 	}
 
+	const finalNodes = Object.values(nodeMap);
 	const updatedEdges = edges.map((e) => {
 		const sourceNode = nodeMap[e.source];
-		const sourceType = sourceNode?.data?.type;
-		const def = nodeRegistry?.nodes?.[sourceType];
+		if (!sourceNode) return e;
+		const def = nodeRegistry?.nodes?.[sourceNode.data?.type];
 		const showLabel = def?.showOutputOnEdge !== false;
-
+		const label = sourceNode.data.value ?? sourceNode.data.response ?? '';
 		return {
 			...e,
 			data: {
 				...e.data,
-				label: showLabel ? (sourceNode?.data?.value ?? '').toString() : '',
+				label: showLabel ? String(label) : '',
 			},
 		};
 	});
 
-	return { nodes: Object.values(nodeMap), edges: updatedEdges };
+	setNodes(finalNodes);
+	return { nodes: finalNodes, edges: updatedEdges };
 }
