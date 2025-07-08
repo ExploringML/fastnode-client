@@ -98,6 +98,8 @@ export default function MetaNode({ id, data, selected, nodeRegistry, onFieldChan
 	return (
 		<BaseNode
 			selected={selected}
+			progress={data.progress}
+			status={data.status}
 			style={data?.style}
 			className={cn(
 				"min-w-[175px] min-h-[250px] w-full h-full flex flex-col px-3 py-2",
@@ -137,9 +139,9 @@ export default function MetaNode({ id, data, selected, nodeRegistry, onFieldChan
 						const Widget = widgetMap[spec.ui];
 
 						//if (data.type === 'display_text') {
-							//console.log("DEBUG: data", data);
-							//console.log("DEBUG: key", key);
-							//console.log("DEBUG: spec", spec);
+						//console.log("DEBUG: data", data);
+						//console.log("DEBUG: key", key);
+						//console.log("DEBUG: spec", spec);
 						//}
 
 						// ▸ pull whatever is stored for this field

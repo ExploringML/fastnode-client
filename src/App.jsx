@@ -323,7 +323,7 @@ export default function App() {
       setNodes,
       nodeRegistry,
       ws: ws.current,
-      options: { traversal: false, evaluation: true, delay: 250 },
+      options: { traversal: false, evaluation: true, delay: 350 },
     });
 
     setNodes(n2);

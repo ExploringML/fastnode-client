@@ -9,7 +9,11 @@ export function buildInputGraph(edges) {
 	const g = new Map();
 	for (const e of edges) {
 		if (!g.has(e.target)) g.set(e.target, []);
-		g.get(e.target).push({ source: e.source, handle: e.targetHandle });
+		g.get(e.target).push({
+			source: e.source,
+			sourceHandle: e.sourceHandle,
+			targetHandle: e.targetHandle,
+		});
 	}
 	return g;
 }
@@ -35,9 +39,10 @@ function evaluateClientNode(node, def, inputVals) {
 		const val = inputVals.value;
 		return typeof val === 'number' ? val.toString() : val ?? '';
 	}
-	if (type === 'textarea_input') return node.data.text;
+	if (type === 'textarea_input') return node.data.prompt ?? node.data.text;
 	if (type === 'image_model_selector') return node.data.model;
 	if (type === 'load_sd_model') return node.data.model;
+	if (type === 'display_image') return inputVals.image;
 
 	console.warn(`⚠️ No evaluator for client-only node type: ${type}`);
 	return null;
@@ -175,14 +180,37 @@ async function evaluateNode({
 		}
 	}
 
+	console.log(`EVALUATING node ${id} (${node.data.type})`);
 	const inputVals = {};
-	for (const { source, handle } of inputs) {
-		const rawVal = memo.get(source);
-		inputVals[handle] =
-			rawVal && typeof rawVal === 'object' && !Array.isArray(rawVal)
-				? rawVal.value ?? rawVal.response ?? rawVal
-				: rawVal;
+	for (const { source, sourceHandle, targetHandle } of inputs) {
+		const sourceResult = memo.get(source);
+		console.log(`  -> Input from ${source} (${sourceHandle}) to ${id} (${targetHandle})`);
+		console.log(`  -> Raw sourceResult from memo:`, sourceResult);
+
+		if (sourceResult === undefined || sourceResult === null) {
+			continue;
+		}
+
+		let valueToPass;
+
+		// If the source node's output is an object, select the correct property.
+		if (typeof sourceResult === 'object' && !Array.isArray(sourceResult)) {
+			// The edge's sourceHandle tells us which output property to use.
+			if (sourceHandle && sourceHandle in sourceResult) {
+				valueToPass = sourceResult[sourceHandle];
+			} else {
+				// Fallback for older nodes or single-output nodes that return an object
+				// but don't have a specific handle matched.
+				valueToPass = sourceResult.value ?? sourceResult.response ?? sourceResult;
+			}
+		} else {
+			// If the output is a primitive value, pass it directly.
+			valueToPass = sourceResult;
+		}
+		inputVals[targetHandle] = valueToPass;
+		console.log(`  -> Value passed:`, valueToPass);
 	}
+	console.log(`  => Final inputVals for ${id}:`, inputVals);
 
 	/* ------------------------------------------------------------------
 	 * 3. Evaluation Highlight (Green Border) & Execution
@@ -201,7 +229,15 @@ async function evaluateNode({
 	if (def.clientOnly) {
 		newVal = evaluateClientNode(node, def, inputVals);
 		if (nodeMap[id]) {
-			nodeMap[id].data.value = newVal;
+			const paramKeys = Object.keys(def.params || {});
+			const outputKey = paramKeys[0] || 'value';
+			//console.log("1: paramKeys", paramKeys);
+			//console.log("2: outputKey", outputKey);
+			//console.log("3: node", node);
+			//console.log("4: def", def);
+			//console.log("5: inputVals", inputVals);
+			//console.log("6: newVal", newVal);
+			nodeMap[id].data[outputKey] = newVal;
 		}
 	} else {
 		try {
@@ -227,6 +263,7 @@ async function evaluateNode({
 	}
 
 	memo.set(id, newVal);
+	console.log(`  <= Memoized result for ${id}:`, newVal);
 
 	/* ------------------------------------------------------------------
 	 * 4. Final UI Update (Removes Highlight)
@@ -268,6 +305,7 @@ export async function runFlow({
 	const graph = buildInputGraph(edges);
 	const nodeMap = Object.fromEntries(nodes.map(n => [n.id, JSON.parse(JSON.stringify(n))]));
 	const memo = new Map();
+	//console.log("3: graph", graph);
 
 	for (const tid of targetIds) {
 		await evaluateNode({
