@@ -19,10 +19,11 @@ import {
   DropdownMenu, DropdownMenuTrigger,
   DropdownMenuContent, DropdownMenuItem
 } from "@/components/ui/dropdown-menu";
-import { Plus, RefreshCcw } from "lucide-react";
+import { Plus, RefreshCcw, Play, Trash2 } from "lucide-react";
 import { useReactFlow } from "@xyflow/react";
 import { nanoid } from "nanoid";
 import { loadNodeRegistry } from './custom_utils/loadNodeRegistry';
+import { FastHTMLLogo, ReactFlowLogo } from './assets/svg';
 
 const edgeTypes = {
   data: DataEdge,
@@ -622,127 +623,18 @@ export default function App() {
               nodesFocusable={true}
               edgesFocusable={true}
               disableKeyboardA11y={false}
+              proOptions={{ hideAttribution: true }}
               aria-label="Node editor canvas"
             >
               <Controls />
               <MiniMap />
               <Background variant="dots" gap={12} size={1} />
-              <Panel position="bottom-center">
+              <Panel position="bottom-center" className="flex items-center gap-4 p-2">
                 <button
                   onClick={handleTraversalTrigger}
-                  className="!bg-blue-500 text-white px-4 py-2 rounded shadow hover:bg-blue-700 transition"
+                  className="h-10 !bg-blue-500 text-white flex items-center gap-1 !rounded-sm"
                 >
-                  Run All
-                </button>
-                <button
-                  onClick={() => {
-                    // Create a clean workflow without pre-calculated values
-                    setNodes([
-                      {
-                        id: 'num-1',
-                        type: 'number',
-                        position: { x: 0, y: 0 },
-                        data: { type: 'number', value: 3 }
-                      },
-                      {
-                        id: 'num-2',
-                        type: 'number',
-                        position: { x: 0, y: 200 },
-                        data: { type: 'number', value: 5 }
-                      },
-                      {
-                        id: 'num-3',
-                        type: 'number',
-                        position: { x: 0, y: 400 },
-                        data: { type: 'number', value: 2 }
-                      },
-                      {
-                        id: 'sum-1',
-                        type: 'sum',
-                        position: { x: 300, y: 100 },
-                        data: { type: 'sum' }  // No result/value
-                      },
-                      {
-                        id: 'sum-2',
-                        type: 'sum',
-                        position: { x: 300, y: 300 },
-                        data: { type: 'sum' }  // No result/value
-                      },
-                      {
-                        id: 'res-1',
-                        type: 'display_text',
-                        position: { x: 600, y: 100 },
-                        data: { type: 'display_text' }
-                      },
-                      {
-                        id: 'res-2',
-                        type: 'display_text',
-                        position: { x: 600, y: 300 },
-                        data: { type: 'display_text' }
-                      }
-                    ]);
-                    setEdges([
-                      { id: 'e1', source: 'num-1', target: 'sum-1', targetHandle: 'x', type: 'data', data: { key: 'value' } },
-                      { id: 'e2', source: 'num-2', target: 'sum-1', targetHandle: 'y', type: 'data', data: { key: 'value' } },
-                      { id: 'e3', source: 'num-2', target: 'sum-2', targetHandle: 'x', type: 'data', data: { key: 'value' } },
-                      { id: 'e4', source: 'num-3', target: 'sum-2', targetHandle: 'y' },
-                      { id: 'e5', source: 'sum-1', target: 'res-1', targetHandle: 'value', type: 'data', data: { key: 'value' } },
-                      { id: 'e6', source: 'sum-2', target: 'res-2', targetHandle: 'value' }
-                    ]);
-                  }}
-                  className="!bg-green-500 text-white px-4 py-2 rounded shadow hover:bg-green-700 transition ml-2"
-                >
-                  Reset Clean
-                </button>
-                <button
-                  onClick={() => {
-                    // Create image generation workflow
-                    // Check what node types are available
-                    console.log('🔍 Available node types:', Object.keys(nodeRegistry?.nodes || {}));
-
-                    // Use simple known types first, then upgrade when we know what's available
-                    setNodes([
-                      {
-                        id: 'a',
-                        type: 'textarea_input',
-                        position: { x: 100, y: 30 },
-                        data: { type: 'textarea_input', text: 'A cat with multi-color fur.' }
-                      },
-                      {
-                        id: 'b',
-                        type: 'image_model_selector',
-                        position: { x: 160, y: 280 },
-                        data: { type: 'image_model_selector', model: 'gpt-image-1' }
-                      },
-                      {
-                        id: 'c',
-                        type: 'generate_image',
-                        position: { x: 600, y: 130 },
-                        data: { type: 'generate_image' }
-                      }
-                    ]);
-                    setEdges([
-                      {
-                        id: 'e1',
-                        source: 'a',
-                        sourceHandle: 'prompt',
-                        target: 'c',
-                        targetHandle: 'prompt',
-                        type: 'data'
-                      },
-                      {
-                        id: 'e2',
-                        source: 'b',
-                        sourceHandle: 'model',
-                        target: 'c',
-                        targetHandle: 'model',
-                        type: 'data'
-                      }
-                    ]);
-                  }}
-                  className="!bg-purple-500 text-white px-4 py-2 rounded shadow hover:bg-purple-700 transition ml-2"
-                >
-                  Load Image Gen
+                  <Play className="text-white h-4 w-4" />Run
                 </button>
                 <button
                   onClick={() => {
@@ -751,9 +643,10 @@ export default function App() {
                       setEdges([]);
                     }
                   }}
-                  className="!bg-red-500 text-white px-4 py-2 rounded shadow hover:bg-red-700 transition ml-2"
+                  className="!bg-transparent h-10 !px-3 flex items-center !rounded-sm hover:!border-transparent _focus:!outline-none"
+                  title="Clear canvas"
                 >
-                  Clear Canvas
+                  <Trash2 className="h-6 w-6" />
                 </button>
               </Panel>
               <Panel position="top-right" className="flex items-center gap-2 p-2">
@@ -835,7 +728,7 @@ export default function App() {
                     borderRadius: '50%',
                     backgroundColor: wsConnected ? 'green' : 'red',
                   }}
-                  title={wsConnected ? 'Connected to server' : 'Disconnected'}
+                  title={wsConnected ? 'Connected to server' : 'Disconnected from server'}
                 />
               </Panel>
               <Panel position="top-left" className="flex items-center gap-2 p-2">
@@ -887,9 +780,9 @@ export default function App() {
           </div>
         </ReactFlowProvider>
         <div className="h-10 bg-gray-200 flex items-center justify-between py-6 px-4 text-sm">
-          <div>&copy; 2025</div>
+          <div className="flex items-center gap-1">Built with <a href="https://fastht.ml/" target="_blank" rel="noopener noreferrer"><FastHTMLLogo className="w-18" /></a> and <a href="https://reactflow.dev/" target="_blank" rel="noopener noreferrer"><ReactFlowLogo className="w-6" /></a></div>
           <div className="flex items-center gap-1">
-            Created with <Heart className="w-4 h-4 text-red-500" fill="currentColor" /> by <a href="https://x.com/dgwyer" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">David Gwyer</a>
+            Created with <Heart className="w-4 h-4 text-red-500" fill="currentColor" /> by <a href="https://x.com/dgwyer" target="_blank" rel="noopener noreferrer" className="!text-blue-500">David Gwyer</a> &copy; 2025
           </div>
         </div>
       </div>
